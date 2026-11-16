@@ -48,6 +48,7 @@ pub(crate) struct SessionView {
     pub provider: String,
     pub user_id: String,
     pub nickname: String,
+    pub avatar_url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +98,7 @@ impl State {
                 provider: String::new(),
                 user_id: String::new(),
                 nickname: String::new(),
+                avatar_url: String::new(),
             },
             search_generation: 0,
             search: SearchView {
@@ -626,6 +628,7 @@ fn session_in(provider: &str, account: &Account) -> SessionView {
         provider: provider.to_owned(),
         user_id: account.id.clone(),
         nickname: account.nickname.clone(),
+        avatar_url: account.avatar_url.clone().unwrap_or_default(),
     }
 }
 
@@ -635,6 +638,7 @@ fn signed_out() -> SessionView {
         provider: String::new(),
         user_id: String::new(),
         nickname: String::new(),
+                avatar_url: String::new(),
     }
 }
 

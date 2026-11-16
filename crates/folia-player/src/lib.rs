@@ -1,0 +1,164 @@
+// Audio playback: a decoder thread feeds a lock-free ring buffer that the device callback drains.
+
+mod analyser;
+mod convert;
+mod decoder;
+pub mod bass;
+#[cfg(not(target_os="android"))]
+mod output;
+#[cfg(target_os="android")]
+#[path="android_output.rs"]
+mod output;
+mod shared;
+mod source;
+
+pub use analyser::{Analyser, TAP_CAPACITY, push_samples};
+pub use convert::map_channels;
+pub use folia_core::AudioFrame;
+pub use shared::PlayerState;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Sender};
+
+#[cfg(not(target_os="android"))]
+use cpal::traits::StreamTrait;
+
+use crate::decoder::{Command, Decoder};
+use crate::shared::Shared;
+
+#[derive(Debug, thiserror::Error)]
+pub enum PlayerError {
+    #[error("no audio output device")]
+    NoDevice,
+    #[error("Android audio output failed: {0}")]
+    Output(String),
+    #[error("audio output device error")]
+    Device(#[source] cpal::Error),
+    #[error("unsupported output sample format {0}")]
+    UnsupportedFormat(String),
+    #[error("cannot open {path}")]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("file has no playable audio track")]
+    NoAudioTrack,
+    #[error("cannot decode audio")]
+    Decode(#[from] symphonia::core::errors::Error),
+    #[error("cannot resample audio: {0}")]
+    Resample(String),
+    #[error("cannot start the decoder thread")]
+    Thread(#[source] std::io::Error),
+}
+
+/// What the UI needs to draw the transport: state, position and length in seconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Status {
+    pub state: PlayerState,
+    pub position: f64,
+    pub duration: f64,
+}
+
+pub struct Player {
+    commands: Sender<Command>,
+    shared: Arc<Shared>,
+    stream: output::Stream,
+    rate: u32,
+    analyser: Analyser,
+}
+
+impl Player {
+    pub fn new() -> Result<Self, PlayerError> {
+        let shared = Arc::new(Shared::new());
+        let (tap, analyser) = Analyser::pair();
+        let (output, producer) = output::open(shared.clone(), tap)?;
+        let (commands, receiver) = mpsc::channel();
+        let decoder = Decoder::new(shared.clone(), producer, output.channels, output.rate, receiver);
+        std::thread::Builder::new()
+            .name("folia-decoder".into())
+            .spawn(move || decoder.run())
+            .map_err(PlayerError::Thread)?;
+        tracing::info!(rate = output.rate, channels = output.channels, "audio output opened");
+        Ok(Self { commands, shared, stream: output.stream, rate: output.rate, analyser })
+    }
+
+    /// The latest spectrum. `playing` selects analysis; otherwise the frame is the idle breath.
+    pub fn audio_frame(&mut self, playing: bool, wall_ms: f64) -> AudioFrame {
+        *self.analyser.frame(playing, wall_ms)
+    }
+
+    /// Starts playing `path` from the beginning.
+    pub fn load(&self, path: &Path) { self.load_at(path,0.0,true); }
+
+    pub fn load_at(&self, path: &Path, position: f64, playing: bool) {
+        // Mark the new track as playing now, so a status read before the decoder starts never sees the old end.
+        let epoch=self.shared.command_epoch.fetch_add(1,std::sync::atomic::Ordering::AcqRel)+1;
+        self.shared.decoder_done.store(false, std::sync::atomic::Ordering::Release);
+        self.shared.duration.store(0.0);
+        self.shared.request_flush(position);
+        self.shared.set_state(if playing {PlayerState::Playing} else {PlayerState::Paused});
+        self.run_stream(true);
+        self.send(Command::Load(path.to_owned(),position,epoch));
+    }
+
+    pub fn pause(&self) {
+        if self.shared.state() == PlayerState::Playing {
+            self.shared.set_state(PlayerState::Paused);
+        }
+    }
+
+    pub fn resume(&self) {
+        if self.shared.state() == PlayerState::Paused {
+            self.shared.set_state(PlayerState::Playing);
+        }
+    }
+
+    pub fn seek(&self, seconds: f64) {
+        self.run_stream(true);
+        self.send(Command::Seek(seconds,self.shared.command_epoch.load(std::sync::atomic::Ordering::Acquire)));
+    }
+
+    pub fn stop(&self) {
+        let epoch=self.shared.command_epoch.fetch_add(1,std::sync::atomic::Ordering::AcqRel)+1;
+        self.shared.set_state(PlayerState::Idle);
+        self.send(Command::Stop(epoch));
+        self.run_stream(false);
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.shared.volume()
+    }
+
+    /// Sets the output gain, clamped to `0.0..=1.0`.
+    pub fn set_volume(&self, volume: f32) {
+        self.shared.set_volume(volume);
+    }
+
+    pub fn status(&self) -> Status {
+        #[cfg(target_os="android")]
+        self.stream.maintain();
+        let state = self.shared.state();
+        let duration = self.shared.duration.load();
+        let position = match state {
+            PlayerState::Idle => 0.0,
+            _ => self.shared.position(self.rate).min(if duration > 0.0 { duration } else { f64::MAX }),
+        };
+        Status { state, position, duration }
+    }
+
+    fn send(&self, command: Command) {
+        if self.commands.send(command).is_err() {
+            tracing::error!("decoder thread has stopped");
+        }
+    }
+
+    // The stream runs while a track is loaded, paused included, so flushes are always acknowledged.
+    fn run_stream(&self, running: bool) {
+        let result = if running { self.stream.play() } else { self.stream.pause() };
+        if let Err(err) = result {
+            tracing::warn!(error = &err as &dyn std::error::Error, running, "cannot change output stream state");
+        }
+    }
+}

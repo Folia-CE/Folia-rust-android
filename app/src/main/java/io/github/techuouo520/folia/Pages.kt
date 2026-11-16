@@ -103,60 +103,6 @@ fun LoginDialog(bridge: FoliaBridge, onDismiss: () -> Unit) {
 }
 
 @Composable
-fun SettingsDialog(bridge: FoliaBridge, onDismiss: () -> Unit) {
-    var language by remember { mutableStateOf(bridge.languagePreference()) }
-    var dark by remember { mutableStateOf(bridge.darkTheme()) }
-    var quality by remember { mutableStateOf(bridge.audioQuality()) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(bridge.t("libraryBravaisHome.settings")) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(bridge.t("options.appLanguage"))
-                Column {
-                    listOf(
-                        "system" to "options.appLanguageSystem",
-                        "en" to "options.appLanguageEnUS",
-                        "zh-CN" to "options.appLanguageZhCN",
-                        "zh-TW" to "options.appLanguageZhTW",
-                        "in" to "options.appLanguageInID",
-                        "vi" to "options.appLanguageViVN",
-                    ).forEach { (code, key) ->
-                        TextButton(onClick = {
-                            language = code
-                            bridge.setLanguagePreference(code)
-                            bridge.setSystemLocale(java.util.Locale.getDefault().toLanguageTag())
-                        }) { Text(if (code == language) "[${bridge.t(key)}]" else bridge.t(key)) }
-                    }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(bridge.t(if (dark) "options.daylightModeDark" else "options.daylightModeLight"), modifier = Modifier.weight(1f))
-                    Switch(checked = dark, onCheckedChange = {
-                        dark = it
-                        bridge.setDarkTheme(it)
-                    })
-                }
-                Text(bridge.t("account.audioQuality"))
-                Column {
-                    listOf(
-                        "standard" to "account.qualityStandard",
-                        "high" to "account.qualityExhigh",
-                        "ultra" to "account.qualityUltra",
-                        "lossless" to "account.qualityLossless",
-                        "hires" to "account.qualityHires",
-                    ).forEach { (level, key) ->
-                        TextButton(onClick = { quality = level; bridge.setAudioQuality(level) }) {
-                            Text(if (level == quality) "[${bridge.t(key)}]" else bridge.t(key))
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text(bridge.t("ui.back")) } },
-    )
-}
-
-@Composable
 fun SearchPage(bridge: FoliaBridge, onBack: () -> Unit, onPlay: (List<LibraryTrack>, Int) -> Unit) {
     var query by remember { mutableStateOf("") }
     var snapshot by remember { mutableStateOf(SearchSnapshot(false, "", "", emptyList(), false, 0)) }
@@ -174,7 +120,7 @@ fun SearchPage(bridge: FoliaBridge, onBack: () -> Unit, onPlay: (List<LibraryTra
         }
     }
     Surface(modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.safeDrawingPadding().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(modifier = Modifier.safeDrawingPadding().padding(top=80.dp).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = onBack) { Text(bridge.t("ui.back")) }
             androidx.compose.material3.OutlinedTextField(value = query, onValueChange = { query = it }, modifier = Modifier.fillMaxWidth(), label = { Text(bridge.t("libraryBravaisHome.searchPlaceholder")) }, singleLine = true)
             if (snapshot.loading) {
@@ -211,7 +157,7 @@ fun CollectionPage(bridge: FoliaBridge, collectionKey: String, onBack: () -> Uni
         }
     }
     Surface(modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.safeDrawingPadding().padding(16.dp)) {
+        Column(modifier = Modifier.safeDrawingPadding().padding(top=80.dp).padding(16.dp)) {
             TextButton(onClick = onBack) { Text(bridge.t("ui.back")) }
             Text(page.title, style = MaterialTheme.typography.titleLarge)
             if (page.loading) {
@@ -235,36 +181,3 @@ fun CollectionPage(bridge: FoliaBridge, collectionKey: String, onBack: () -> Uni
     }
 }
 
-@Composable
-fun EqualizerDialog(bridge: FoliaBridge, onDismiss: () -> Unit) {
-    var snapshot by remember { mutableStateOf(bridge.equalizer()) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(bridge.t("ui.equalizerTitle")) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(bridge.t("ui.equalizerDescription"))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (snapshot.enabled) bridge.t("ui.equalizerEnabled") else bridge.t("ui.equalizerDisabled"), modifier = Modifier.weight(1f))
-                    Switch(checked = snapshot.enabled, onCheckedChange = {
-                        bridge.setEqualizerEnabled(it)
-                        snapshot = bridge.equalizer()
-                    })
-                }
-                Row {
-                    snapshot.presets.forEach { preset ->
-                        TextButton(onClick = {
-                            bridge.setEqualizerPreset(preset)
-                            snapshot = bridge.equalizer()
-                        }) { Text(if (preset == snapshot.preset) "[${bridge.t("ui.equalizerPreset.$preset")}]" else bridge.t("ui.equalizerPreset.$preset")) }
-                    }
-                }
-                snapshot.gains.forEachIndexed { index, gain ->
-                    Text("${gain.toInt()} dB")
-                    Slider(value = gain, onValueChange = { bridge.setEqualizerGain(index, it); snapshot = bridge.equalizer() }, valueRange = -12f..12f)
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text(bridge.t("ui.back")) } },
-    )
-}

@@ -5,13 +5,13 @@ use std::thread::JoinHandle;
 
 use std::sync::Arc;
 
-use folia_core::{AudioQuality, EqualizerSettings, Lyrics, Queue, Repeat};
+use folia_core::{AudioQuality, Lyrics, Queue, Repeat};
 use folia_player::{Player, PlayerError, PlayerState};
 use parking_lot::Mutex;
 
 use crate::{BridgeError, LibraryTrack, PlaybackSnapshot, RepeatMode, TransportState};
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Queued {
     id: i64,
     path: PathBuf,
@@ -61,6 +61,9 @@ type AudioFetch = Arc<dyn Fn(&str, &str, AudioQuality) -> Result<PathBuf, String
 type LyricsFetch = Arc<dyn Fn(&str, &str) -> Result<Option<Lyrics>, String> + Send + Sync>;
 type ArtworkFetch = Arc<dyn Fn(&str, &str) -> Result<Vec<u8>, String> + Send + Sync>;
 
+#[derive(serde::Serialize,serde::Deserialize)]
+struct ResumeState { version:u8, tracks:Vec<Queued>, index:usize, position:f64, repeat:Repeat }
+
 struct Playback {
     commands: Sender<Command>,
     player: Option<Player>,
@@ -71,13 +74,18 @@ struct Playback {
     token: u64,
     loading: bool,
     quality: AudioQuality,
-    equalizer: EqualizerSettings,
     lyrics: Option<(i64, Lyrics)>,
     artwork: Option<(i64, Vec<u8>)>,
     artwork_for: Option<i64>,
     audio_fetch: AudioFetch,
     lyrics_fetch: LyricsFetch,
     artwork_fetch: ArtworkFetch,
+    checkpoint: PathBuf,
+    last_save: std::time::Instant,
+    position_on_load: f64,
+    restored: bool,
+    want_play: bool,
+    recovering: bool,
 }
 
 impl Playback {
@@ -86,6 +94,7 @@ impl Playback {
         audio_fetch: AudioFetch,
         lyrics_fetch: LyricsFetch,
         artwork_fetch: ArtworkFetch,
+        checkpoint: PathBuf,
     ) -> Self {
         Self {
             commands,
@@ -97,14 +106,51 @@ impl Playback {
             token: 0,
             loading: false,
             quality: AudioQuality::High,
-            equalizer: EqualizerSettings::default(),
             lyrics: None,
             artwork: None,
             artwork_for: None,
             audio_fetch,
             lyrics_fetch,
-            artwork_fetch,
+            artwork_fetch, checkpoint, last_save:std::time::Instant::now(),
+            position_on_load:0.0, restored:false, want_play:false, recovering:false,
         }
+    }
+
+    fn restore(&mut self) {
+        let loaded=std::fs::read(&self.checkpoint).ok().and_then(|bytes|serde_json::from_slice::<ResumeState>(&bytes).ok());
+        if let Some(saved)=loaded.filter(|s|s.version==1 && s.index<s.tracks.len() && s.position.is_finite()) {
+            self.queue.replace(saved.tracks,saved.index);self.queue.repeat=saved.repeat;
+            self.position_on_load=saved.position.max(0.0);self.restored=true;self.want_play=false;
+            self.generation=self.generation.wrapping_add(1);
+        }
+    }
+    fn save(&mut self,force:bool) {
+        if !force && self.last_save.elapsed()<std::time::Duration::from_secs(2) {return}
+        self.last_save=std::time::Instant::now();
+        let Some(index)=self.queue.current_index() else {return};
+        let state=ResumeState{version:1,tracks:self.queue.items().to_vec(),index,
+            position:self.snapshot().position_seconds,repeat:self.queue.repeat};
+        let result=(|| -> Result<(),Box<dyn std::error::Error>> {
+            let bytes=serde_json::to_vec(&state)?;
+            if let Some(parent)=self.checkpoint.parent(){std::fs::create_dir_all(parent)?;}
+            let temporary=self.checkpoint.with_extension("tmp");
+            use std::io::Write;
+            let mut file=std::fs::File::create(&temporary)?;file.write_all(&bytes)?;file.sync_all()?;
+            std::fs::rename(temporary,&self.checkpoint)?;Ok(())
+        })();
+        if let Err(error)=result {tracing::warn!(%error,"playback checkpoint failed");}
+    }
+
+    // Mutate queue ownership on the playback thread without restarting the current decoder.
+    fn enqueue_next(&mut self, tracks: Vec<LibraryTrack>) -> Result<(), BridgeError> {
+        if tracks.is_empty() { return Ok(()); }
+        let current = self.queue.current_index();
+        let mut queued = self.queue.items().to_vec();
+        let at = current.map_or(0, |i| i + 1);
+        queued.splice(at..at, tracks.iter().map(Queued::from_track));
+        self.queue.replace(queued, current.unwrap_or(usize::MAX));
+        self.generation = self.generation.wrapping_add(1);
+        Ok(())
     }
 
     fn dispatch(&mut self, command: Command) {
@@ -122,10 +168,10 @@ impl Playback {
             Command::PlayIndex { index, reply } => reply_send(reply, self.play_index(index)),
             Command::SetRepeat { mode, reply } => reply_send(reply, self.set_repeat(mode)),
             Command::CycleRepeat(reply) => reply_send(reply, Ok(self.cycle_repeat())),
+            Command::EnqueueNext { tracks, reply } => reply_send(reply, self.enqueue_next(tracks)),
             Command::Queue(reply) => reply_send(reply, Ok(self.queue_tracks())),
             Command::PlayTracks { tracks, start, reply } => reply_send(reply, self.play_all(tracks, start)),
             Command::SetQuality { quality, reply } => reply_send(reply, self.set_quality(quality)),
-            Command::SetEqualizer { settings, reply } => reply_send(reply, self.apply_equalizer(settings)),
             Command::Lyrics(reply) => reply_send(reply, Ok(self.lyric_view())),
             Command::Artwork(reply) => reply_send(reply, Ok(self.artwork_bytes())),
             Command::Loaded { token, result } => self.loaded(token, result),
@@ -141,21 +187,13 @@ impl Playback {
         Ok(())
     }
 
-    fn apply_equalizer(&mut self, settings: EqualizerSettings) -> Result<(), BridgeError> {
-        self.equalizer = settings;
-        if let Some(player) = self.player.as_mut() {
-            player.set_equalizer(folia_player::Parameters::of(&self.equalizer));
-        }
-        tracing::info!(enabled = self.equalizer.enabled, preset = %self.equalizer.preset, "equalizer applied");
-        Ok(())
-    }
-
     fn play_all(&mut self, tracks: Vec<LibraryTrack>, start: i32) -> Result<(), BridgeError> {
         if tracks.is_empty() {
             tracing::info!("play ignored because the library is empty");
             return Err(BridgeError::Playback { reason: "queue is empty".into() });
         }
         let start = queue_index(start, tracks.len())?;
+        self.restored=false;self.position_on_load=0.0;self.want_play=true;
         self.failures = 0;
         self.queue.replace(tracks.iter().map(Queued::from_track).collect(), start);
         self.generation = self.generation.wrapping_add(1);
@@ -163,6 +201,8 @@ impl Playback {
     }
 
     fn play(&mut self) -> Result<(), BridgeError> {
+        self.want_play=true;
+        if self.loading {return Ok(())}
         match self.player.as_ref().map(Player::status).map(|status| status.state) {
             Some(PlayerState::Paused) => {
                 self.ensure_player()?.resume();
@@ -178,6 +218,7 @@ impl Playback {
     }
 
     fn pause(&mut self) -> Result<(), BridgeError> {
+        self.want_play=false;
         if let Some(player) = self.player.as_ref() {
             player.pause();
             tracing::info!("playback paused");
@@ -186,13 +227,17 @@ impl Playback {
     }
 
     fn seek(&mut self, seconds: f64) -> Result<(), BridgeError> {
+        if !seconds.is_finite(){return Err(BridgeError::Playback{reason:"invalid seek position".into()})}
         let seconds = seconds.max(0.0);
+        if self.restored || self.loading {self.position_on_load=seconds;return Ok(())}
         self.ensure_player()?.seek(seconds);
         tracing::info!(seconds, "seek");
         Ok(())
     }
 
     fn stop(&mut self) -> Result<(), BridgeError> {
+        self.token=self.token.wrapping_add(1);self.loading=false;self.want_play=false;
+        self.restored=true;self.position_on_load=0.0;
         if let Some(player) = self.player.as_ref() {
             player.stop();
         }
@@ -203,7 +248,7 @@ impl Playback {
     fn set_volume(&mut self, volume: f32) -> Result<(), BridgeError> {
         let volume = volume.clamp(0.0, 1.0);
         self.volume = volume;
-        self.ensure_player()?.set_volume(volume);
+        if let Some(player)=self.player.as_ref(){player.set_volume(volume);}
         tracing::info!(volume, "volume set");
         Ok(())
     }
@@ -218,11 +263,13 @@ impl Playback {
     }
 
     fn next(&mut self) -> Result<(), BridgeError> {
+        self.restored=false;self.position_on_load=0.0;self.want_play=true;
         self.failures = 0;
         self.advance(false)
     }
 
     fn previous(&mut self) -> Result<(), BridgeError> {
+        self.restored=false;self.position_on_load=0.0;self.want_play=true;
         self.failures = 0;
         if self.queue.back().is_some() {
             self.start_current()
@@ -233,6 +280,7 @@ impl Playback {
     }
 
     fn play_index(&mut self, index: i32) -> Result<(), BridgeError> {
+        self.restored=false;self.position_on_load=0.0;self.want_play=true;
         let selected = queue_index(index, self.queue.items().len())?;
         if self.queue.select(selected).is_none() {
             return bad_index(index).map(|_| ());
@@ -264,19 +312,26 @@ impl Playback {
 
     fn pump(&mut self) -> Result<(), BridgeError> {
         match self.player.as_ref().map(Player::status).map(|status| status.state) {
-            Some(PlayerState::Ended) => self.advance(true),
-            Some(PlayerState::Failed) => self.fail(),
+            Some(PlayerState::Ended) if self.want_play => self.advance(true),
+            Some(PlayerState::Failed) => {
+                // Recover the same song/position once after a native route disconnect.
+                if self.recovering {
+                    self.position_on_load=self.player.as_ref().map(|p|p.status().position).unwrap_or(self.position_on_load);
+                    self.player=None;self.restored=true;self.want_play=false;self.loading=false;return Ok(())
+                }
+                self.position_on_load=self.player.as_ref().map(|p|p.status().position).unwrap_or(0.0);
+                self.player=None;self.restored=true;self.recovering=true;self.start_current()
+            },
             _ => Ok(()),
         }
     }
 
     fn advance(&mut self, finished: bool) -> Result<(), BridgeError> {
+        self.restored=false;self.position_on_load=0.0;self.want_play=true;
         if self.queue.advance(finished).is_some() {
             self.start_current()
         } else {
-            if let Some(player) = self.player.as_ref() {
-                player.stop();
-            }
+            self.want_play=false;
             tracing::info!("playback reached the end of the queue");
             Ok(())
         }
@@ -302,6 +357,8 @@ impl Playback {
             tracing::info!("play ignored because the queue is empty");
             return Err(BridgeError::Playback { reason: "queue is empty".into() });
         };
+        if !self.restored {self.position_on_load=0.0;self.want_play=true;self.recovering=false;}
+        self.restored=false;
         self.token = self.token.wrapping_add(1);
         self.loading = true;
         if let Some(player) = self.player.as_ref() {
@@ -310,7 +367,8 @@ impl Playback {
         if track.path.is_file() {
             tracing::info!(title = %track.title, path = %track.path.display(), "playing");
             self.loading = false;
-            self.ensure_player()?.load(&track.path);
+            let position=self.position_on_load;let playing=self.want_play;
+            self.ensure_player()?.load_at(&track.path,position,playing);
             self.spawn_lyrics(&track);
             return Ok(());
         }
@@ -351,9 +409,10 @@ impl Playback {
                     track.path = path.clone();
                 }
                 self.loading = false;
+                let position=self.position_on_load;let playing=self.want_play;
                 match self.ensure_player() {
                     Ok(player) => {
-                        player.load(&path);
+                        player.load_at(&path,position,playing);
                         if let Some(track) = self.queue.current().cloned() {
                             self.spawn_lyrics(&track);
                         }
@@ -484,10 +543,10 @@ impl Playback {
     }
 
     fn ensure_player(&mut self) -> Result<&Player, BridgeError> {
+        if self.player.as_ref().is_some_and(|p|p.status().state==PlayerState::Failed){self.player=None;}
         if self.player.is_none() {
-            let mut player = Player::new().map_err(play_err)?;
+            let player = Player::new().map_err(play_err)?;
             player.set_volume(self.volume);
-            player.set_equalizer(folia_player::Parameters::of(&self.equalizer));
             tracing::info!("audio output opened");
             self.player = Some(player);
         }
@@ -497,8 +556,9 @@ impl Playback {
     fn snapshot(&self) -> PlaybackSnapshot {
         let status = self.player.as_ref().map(Player::status);
         let current = self.queue.current();
-        let state = status.map(|item| item.state).unwrap_or(PlayerState::Idle);
-        let position = status.map(|item| item.position).unwrap_or(0.0);
+        let state = if (self.restored || self.loading) && !self.want_play {PlayerState::Paused}
+            else {status.map(|item| item.state).unwrap_or(PlayerState::Idle)};
+        let position = if self.restored || self.loading {self.position_on_load} else {status.map(|item| item.position).unwrap_or(0.0)};
         let decoded = status.map(|item| item.duration).unwrap_or(0.0);
         let (track_id, title, artist, album, path, queued_duration) = match current {
             Some(track) => (
@@ -536,6 +596,7 @@ impl Playback {
 }
 
 enum Command {
+    EnqueueNext { tracks: Vec<LibraryTrack>, reply: Sender<Result<(), BridgeError>> },
     PlayAll { tracks: Vec<LibraryTrack>, start: i32, reply: Sender<Result<(), BridgeError>> },
     Play(Sender<Result<(), BridgeError>>),
     Pause(Sender<Result<(), BridgeError>>),
@@ -552,7 +613,6 @@ enum Command {
     Queue(Sender<Result<Vec<LibraryTrack>, BridgeError>>),
     PlayTracks { tracks: Vec<LibraryTrack>, start: i32, reply: Sender<Result<(), BridgeError>> },
     SetQuality { quality: AudioQuality, reply: Sender<Result<(), BridgeError>> },
-    SetEqualizer { settings: EqualizerSettings, reply: Sender<Result<(), BridgeError>> },
     Lyrics(Sender<Result<crate::LyricSnapshot, BridgeError>>),
     Artwork(Sender<Result<Option<Vec<u8>>, BridgeError>>),
     Shutdown,
@@ -571,12 +631,13 @@ impl PlaybackHost {
         audio_fetch: AudioFetch,
         lyrics_fetch: LyricsFetch,
         artwork_fetch: ArtworkFetch,
+        checkpoint: PathBuf,
     ) -> Result<Self, BridgeError> {
         let (commands, receiver) = mpsc::channel();
         let thread_commands = commands.clone();
         let thread = std::thread::Builder::new()
             .name("folia-playback".into())
-            .spawn(move || run(receiver, thread_commands, audio_fetch, lyrics_fetch, artwork_fetch))
+            .spawn(move || run(receiver, thread_commands, audio_fetch, lyrics_fetch, artwork_fetch, checkpoint))
             .map_err(|error| {
                 tracing::error!(error = &error as &dyn std::error::Error, "cannot start the playback thread");
                 BridgeError::Playback { reason: error.to_string() }
@@ -636,6 +697,10 @@ impl PlaybackHost {
         self.roundtrip(Command::CycleRepeat)
     }
 
+    pub(crate) fn enqueue_next(&self, tracks: Vec<LibraryTrack>) -> Result<(), BridgeError> {
+        self.roundtrip(|reply| Command::EnqueueNext { tracks, reply })
+    }
+
     pub(crate) fn queue(&self) -> Result<Vec<LibraryTrack>, BridgeError> {
         self.roundtrip(Command::Queue)
     }
@@ -646,10 +711,6 @@ impl PlaybackHost {
 
     pub(crate) fn set_quality(&self, quality: AudioQuality) -> Result<(), BridgeError> {
         self.roundtrip(|reply| Command::SetQuality { quality, reply })
-    }
-
-    pub(crate) fn set_equalizer(&self, settings: EqualizerSettings) -> Result<(), BridgeError> {
-        self.roundtrip(|reply| Command::SetEqualizer { settings, reply })
     }
 
     pub(crate) fn lyrics(&self) -> Result<crate::LyricSnapshot, BridgeError> {
@@ -699,14 +760,22 @@ fn run(
     audio: AudioFetch,
     lyrics: LyricsFetch,
     artwork: ArtworkFetch,
+    checkpoint: PathBuf,
 ) {
-    let mut playback = Playback::new(commands, audio, lyrics, artwork);
-    while let Ok(command) = receiver.recv() {
-        if matches!(command, Command::Shutdown) {
-            break;
+    let mut playback = Playback::new(commands, audio, lyrics, artwork,checkpoint);
+    playback.restore();
+    loop {
+        match receiver.recv_timeout(std::time::Duration::from_millis(250)) {
+            Ok(Command::Shutdown)=>break,
+            Ok(command)=> {
+                let force=matches!(command,Command::Pause(_)|Command::Stop(_)|Command::Seek{..}|Command::PlayAll{..}|Command::PlayTracks{..}|Command::PlayIndex{..}|Command::Next(_)|Command::Previous(_)|Command::SetRepeat{..}|Command::EnqueueNext{..});
+                playback.dispatch(command);playback.save(force);
+            },
+            Err(mpsc::RecvTimeoutError::Timeout)=>{let _=playback.pump();playback.save(false);},
+            Err(mpsc::RecvTimeoutError::Disconnected)=>break,
         }
-        playback.dispatch(command);
     }
+    playback.save(true);
     tracing::info!("playback thread stopped");
 }
 

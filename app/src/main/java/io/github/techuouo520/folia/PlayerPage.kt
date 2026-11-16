@@ -52,7 +52,6 @@ fun PlayerPage(
 ) {
     val coverSize = 280.dp
     val edge = with(LocalDensity.current) { coverSize.roundToPx() }.coerceAtLeast(1)
-    var equalizerOpen by remember { mutableStateOf(false) }
     val lyric by produceState(initialValue = bridge.lyrics(), playback.trackId) {
         while (true) {
             value = withContext(Dispatchers.IO) { runCatching { bridge.lyrics() }.getOrDefault(value) }
@@ -75,7 +74,7 @@ fun PlayerPage(
     }
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
-            modifier = Modifier.safeDrawingPadding().padding(20.dp).fillMaxSize(),
+            modifier = Modifier.safeDrawingPadding().padding(top=80.dp).padding(20.dp).fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -98,7 +97,6 @@ fun PlayerPage(
                     Text(word.text, style = MaterialTheme.typography.bodySmall)
                 }
             }
-            TextButton(onClick = { equalizerOpen = true }) { Text(bridge.t("ui.equalizerTitle")) }
             PositionSlider(playback, onSeek)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onPrevious, enabled = playback.hasPrevious) { Text(bridge.t("ui.previousTrack")) }
@@ -112,9 +110,6 @@ fun PlayerPage(
                 Text(message, color = MaterialTheme.colorScheme.error)
             }
         }
-    }
-    if (equalizerOpen) {
-        EqualizerDialog(bridge) { equalizerOpen = false }
     }
 }
 
@@ -157,7 +152,7 @@ private fun repeatLabel(bridge: FoliaBridge, mode: RepeatMode): String {
 fun StoragePermissionScreen(legacy: Boolean, onAllow: () -> Unit) {
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
-            modifier = Modifier.safeDrawingPadding().padding(24.dp).fillMaxSize(),
+            modifier = Modifier.safeDrawingPadding().padding(top=50.dp).padding(24.dp).fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
         ) {
             Text(stringResourceSafe(R.string.permission_storage_title), style = MaterialTheme.typography.headlineSmall)

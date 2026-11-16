@@ -1,4 +1,5 @@
 // Compile the Rust bridge before generating and compiling its Kotlin bindings.
+import java.util.Locale
 import java.util.Properties
 import org.gradle.api.provider.ValueSource
 import org.gradle.api.provider.ValueSourceParameters
@@ -49,7 +50,19 @@ configurations.configureEach {
     }
 }
 
-val llvmStrip = File(sdkPath, "ndk/$ndkRevision/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-strip.exe")
+val hostOs = System.getProperty("os.name").lowercase(Locale.ROOT)
+val ndkHost = when {
+    hostOs.startsWith("windows") -> "windows-x86_64"
+    hostOs.startsWith("mac") -> "darwin-x86_64"
+    hostOs.startsWith("linux") -> "linux-x86_64"
+    else -> error("Unsupported NDK host: $hostOs")
+}
+val stripName = if (hostOs.startsWith("windows")) "llvm-strip.exe" else "llvm-strip"
+val llvmStrip = File(sdkPath, "ndk/$ndkRevision/toolchains/llvm/prebuilt/$ndkHost/bin/$stripName")
+// GUI-launched IDEs may not inherit the shell's Rust tool paths.
+val cargoExecutable = localProperties.getProperty("rust.cargo") ?: "cargo"
+val rustPath = localProperties.getProperty("rust.path")
+    ?: providers.environmentVariable("PATH").getOrElse("")
 
 abstract class StageNative : DefaultTask() {
     @get:InputFile
@@ -148,10 +161,11 @@ androidComponents.onVariants { variant ->
         group = "build"
         description = "Build the arm64 Android Rust bridge ($profile)"
         workingDir(rootProject.projectDir)
+        environment("PATH", rustPath)
         environment("ANDROID_HOME", sdkPath)
         environment("ANDROID_NDK_HOME", File(sdkPath, "ndk/$ndkRevision").absolutePath)
         environment("CARGO_TARGET_DIR", rootProject.layout.projectDirectory.dir("target").asFile.absolutePath)
-        val command = mutableListOf("cargo", "ndk", "-t", "arm64-v8a", "--platform", "26", "build", "--locked", "-p", "folia-bridge", "--lib")
+        val command = mutableListOf(cargoExecutable, "ndk", "-t", "arm64-v8a", "--platform", "26", "build", "--locked", "-p", "folia-bridge", "--lib")
         if (release) {
             command += "--release"
         }
@@ -171,9 +185,10 @@ androidComponents.onVariants { variant ->
         description = "Generate Kotlin bindings from the $profile Rust library"
         dependsOn(buildRust)
         workingDir(rootProject.projectDir)
+        environment("PATH", rustPath)
         environment("CARGO_TARGET_DIR", rootProject.layout.projectDirectory.dir("target").asFile.absolutePath)
         commandLine(
-            "cargo", "run", "--locked", "-p", "folia-bindgen", "--",
+            cargoExecutable, "run", "--locked", "-p", "folia-bindgen", "--",
             "generate", "--library", rustSo.asFile.absolutePath, "--language", "kotlin", "--out-dir", bindings.get().asFile.absolutePath, "--no-format",
         )
         inputs.file(rustSo)
@@ -189,6 +204,8 @@ androidComponents.onVariants { variant ->
 kotlin { jvmToolchain(17) }
 
 dependencies {
+    // SalamPlayer's existing DP vendor-compatibility helper, staged locally (no repository fetch).
+    implementation(files("libs/hiddenapibypass-6.1.aar"))
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.material3)

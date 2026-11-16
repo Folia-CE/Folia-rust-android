@@ -16,7 +16,7 @@ folia-core = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main
 folia-i18n = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main" }
 folia-lyrics = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main" }
 folia-store = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main" }
-folia-player = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main" }
+folia-player = { path = "crates/folia-player" }
 folia-library = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main" }
 folia-omni = { git = "https://github.com/Techuouo520/Folia-rust", branch = "main", default-features = false, features = ["netease", "kugou", "qq", "bodian", "qishui"] }
 folia-render = { path = "crates/folia-render" }
@@ -53,6 +53,13 @@ dbg_macro = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
 
+# SalamPlayer always optimizes its native animation kernels, including debug APKs.
+# Keep Folia's app/bridge debuggable while compiling the imported per-frame scene,
+# BVH occlusion and light packing loops with the same optimization level.
+[profile.dev.package.folia-spatial]
+opt-level = 3
+codegen-units = 1
+
 [profile.release]
 lto = true
 codegen-units = 1
@@ -65,3 +72,6 @@ cryoglyph = { path = "crates/cryoglyph" }
 # keyring 4.2's v1 constructor rejects Android. This stand-in opens the native store.
 keyring = { path = "crates/keyring" }
 
+
+[profile.dev.package.folia-player]
+opt-level = 3

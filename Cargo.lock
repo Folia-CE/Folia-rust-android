@@ -924,12 +924,15 @@ dependencies = [
  "folia-lyrics",
  "folia-omni",
  "folia-player",
+ "folia-spatial",
  "folia-store",
  "jni 0.22.4",
  "keyring",
  "ndk-context",
  "parking_lot",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -1014,8 +1017,8 @@ dependencies = [
 [[package]]
 name = "folia-player"
 version = "0.1.1"
-source = "git+https://github.com/Techuouo520/Folia-rust?branch=main#4513027513ccaf6cba9bec30097e937e57d4d27e"
 dependencies = [
+ "cc",
  "cpal",
  "folia-core",
  "realfft",
@@ -1039,6 +1042,10 @@ dependencies = [
  "tracing",
  "wgpu",
 ]
+
+[[package]]
+name = "folia-spatial"
+version = "0.1.0"
 
 [[package]]
 name = "folia-store"

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Now playing list: three rounded lines, the first led by a small solid play mark. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="512dp"
+    android:height="512dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+  <path
+      android:pathData="M76,118L76,190L138,154Z"
+      android:strokeWidth="26"
+      android:strokeLineJoin="round"
+      android:strokeColor="#000000"
+      android:fillColor="#000000"/>
+  <path
+      android:pathData="M214,154H446M66,274H446M66,394H446"
+      android:strokeWidth="36"
+      android:strokeLineCap="round"
+      android:strokeColor="#000000"
+      android:fillColor="#00000000"/>
+</vector>

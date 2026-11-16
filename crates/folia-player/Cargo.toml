@@ -1,0 +1,17 @@
+[package]
+name = "folia-player"
+version = "0.1.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+[dependencies]
+folia-core.workspace = true
+cpal = "0.18.2"
+realfft = "3.5.1"
+rtrb = "0.4.1"
+rubato = "5.0.1"
+symphonia = { version = "0.6.1", features = ["all"] }
+thiserror.workspace = true
+tracing.workspace = true
+[build-dependencies]
+cc = "1"

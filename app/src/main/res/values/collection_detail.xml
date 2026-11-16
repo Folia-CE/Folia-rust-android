@@ -1,0 +1,6 @@
+<resources>
+    <string name="collection_play_all">Play all · %1$d</string>
+    <string name="collection_retry">Retry</string>
+    <string name="collection_empty">No tracks yet</string>
+    <string name="collection_back">Back to collection wall</string>
+</resources>

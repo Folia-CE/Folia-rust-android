@@ -11,6 +11,9 @@ import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.DisposableEffect
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,6 +37,10 @@ import io.github.techuouo520.folia.bridge.RepeatMode
 import io.github.techuouo520.folia.bridge.ScanPhase
 import io.github.techuouo520.folia.bridge.ScanSnapshot
 import io.github.techuouo520.folia.bridge.TransportState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -51,6 +58,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val bridge = FoliaApp.from(this).bridge
+        configureSystemBars(FoliaApp.from(this).displaySettings.dark(resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK == android.content.res.Configuration.UI_MODE_NIGHT_YES))
         setContent { FoliaScreen(bridge, resumed.intValue) }
     }
 
@@ -74,9 +82,24 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private fun ComponentActivity.configureSystemBars(dark: Boolean) {
+    // SystemBarStyle.auto retains the platform's three-button navigation contrast protection.
+    // Do not hide navigation bars: only the scene draws underneath them.
+    enableEdgeToEdge(
+        statusBarStyle=SystemBarStyle.auto(android.graphics.Color.TRANSPARENT,android.graphics.Color.TRANSPARENT) {dark},
+        navigationBarStyle=SystemBarStyle.auto(0xE6FFFFFF.toInt(),0xCC101014.toInt()) {dark},
+    )
+}
+
 @Composable
 private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
     val context = LocalContext.current
+    FoliaApp.from(context).appearanceVersion
+    val dark=FoliaApp.from(context).displaySettings.dark(androidx.compose.foundation.isSystemInDarkTheme())
+    DisposableEffect(dark) {
+        (context as? ComponentActivity)?.configureSystemBars(dark)
+        onDispose { }
+    }
     var storageGranted by remember { mutableStateOf(storageGranted(context)) }
     var notificationsGranted by remember { mutableStateOf(notificationsGranted(context)) }
     LaunchedEffect(resumeEpoch) {
@@ -90,6 +113,7 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
         notificationsGranted = notificationsGranted(context)
     }
     if (!storageGranted) {
+        FoliaTheme(bridge,dark) {
         StoragePermissionScreen(
             legacy = Build.VERSION.SDK_INT < Build.VERSION_CODES.R,
             onAllow = {
@@ -100,6 +124,7 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
                 }
             },
         )
+        }
         return
     }
     val shell by produceState(initialValue = idleShell(bridge), bridge) {
@@ -127,16 +152,19 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
         }
     }
     var route by remember { mutableStateOf("home") }
-    var collectionKey by remember { mutableStateOf("") }
+    var playerExpanded by remember {mutableStateOf(false)}
+    val commandScope=rememberCoroutineScope()
+    val commandLock=remember {Mutex()}
     var message by remember { mutableStateOf<String?>(null) }
     val action: (() -> Unit) -> Unit = { block ->
-        try {
-            block()
-            message = null
-            PlaybackService.requestRefresh()
-        } catch (error: Exception) {
-            Log.e("Folia", "playback action failed", error)
-            message = error.message ?: error.javaClass.simpleName
+        commandScope.launch {
+            try {
+                commandLock.withLock {withContext(Dispatchers.IO) {block()}}
+                message=null;PlaybackService.requestRefresh()
+            } catch(error: Exception) {
+                if(error is kotlinx.coroutines.CancellationException) throw error
+                Log.e("Folia","playback action failed",error);message=error.message?:error.javaClass.simpleName
+            }
         }
     }
     val playAt: (Int) -> Unit = { index ->
@@ -159,32 +187,15 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
             action { bridge.play() }
         }
     }
+    FoliaTheme(bridge,dark,shell.playback) {
+    AppCornerWindows(bridge) {
     when (route) {
-        "player" -> PlayerPage(
-            bridge = bridge,
-            playback = shell.playback,
-            message = message,
-            onBack = { route = "home" },
-            onToggle = toggle,
-            onPrevious = { action { bridge.previous() } },
-            onNext = { action { bridge.next() } },
-            onSeek = { seconds -> action { bridge.seek(seconds) } },
-            onCycleRepeat = { action { bridge.cycleRepeat() } },
-        )
         "search" -> SearchPage(bridge = bridge, onBack = { route = "home" }, onPlay = { tracks, index ->
             if (!AudioFocus.acquire(context, bridge)) {
                 message = context.getString(R.string.focus_denied)
             } else {
                 action { bridge.playTracks(tracks, index) }
-                route = "player"
-            }
-        })
-        "collection" -> CollectionPage(bridge = bridge, collectionKey = collectionKey, onBack = { route = "home" }, onPlay = { tracks, index ->
-            if (!AudioFocus.acquire(context, bridge)) {
-                message = context.getString(R.string.focus_denied)
-            } else {
-                action { bridge.playTracks(tracks, index) }
-                route = "player"
+                route = "home";playerExpanded=true
             }
         })
         else -> HomePage(
@@ -197,12 +208,9 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
                     notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                 }
             },
-            onOpenPlayer = { route = "player" },
+            onOpenPlayer = { playerExpanded=true },
+            playerExpanded=playerExpanded,onPlayerExpanded={playerExpanded=it},
             onOpenSearch = { route = "search" },
-            onOpenCollection = { key ->
-                collectionKey = key
-                route = "collection"
-            },
             onPlay = { tracks, index ->
                 if (!AudioFocus.acquire(context, bridge)) {
                     message = context.getString(R.string.focus_denied)
@@ -214,6 +222,8 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
             action = action,
         )
     }
+}
+}
 }
 
 private fun idleShell(bridge: FoliaBridge): Shell {

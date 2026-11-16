@@ -1,6 +1,7 @@
 // Foreground media session. The Rust player is the source of position, and this service only mirrors it.
 package io.github.techuouo520.folia
 
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -19,11 +20,14 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class PlaybackService : MediaSessionService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var mediaSession: MediaSession? = null
     private var player: FoliaPlayer? = null
+    private val wakeLock by lazy { (getSystemService(Context.POWER_SERVICE) as android.os.PowerManager)
+        .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK,"Folia:Playback").apply {setReferenceCounted(false)} }
     private val noisy = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action != AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
@@ -31,13 +35,10 @@ class PlaybackService : MediaSessionService() {
             }
             Log.i(TAG, "audio route disconnected, pausing")
             AudioFocus.clearResume()
-            try {
-                FoliaApp.from(context).bridge.pause()
-            } catch (error: Exception) {
-                Log.e(TAG, "pause after audio disconnect failed", error)
+            scope.launch {
+                withContext(Dispatchers.IO) {runCatching {FoliaApp.from(context).bridge.pause()}.onFailure {Log.e(TAG,"pause after disconnect failed",it)}}
+                AudioFocus.abandon();player?.refresh()
             }
-            AudioFocus.abandon()
-            player?.refresh()
         }
     }
 
@@ -45,7 +46,13 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
         val created = FoliaPlayer(this, FoliaApp.from(this).bridge, Looper.getMainLooper())
         player = created
-        mediaSession = MediaSession.Builder(this, created).setId("folia").build()
+        setShowNotificationForIdlePlayer(SHOW_NOTIFICATION_FOR_IDLE_PLAYER_ALWAYS)
+        val activity=PendingIntent.getActivity(this,0,Intent(this,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        mediaSession = MediaSession.Builder(this,created).setId("folia").setSessionActivity(activity)
+            .setPeriodicPositionUpdateEnabled(true)
+            .setCallback(object: MediaSession.Callback {
+                override fun onPlaybackResumption(session: MediaSession,controller: MediaSession.ControllerInfo,isForPlayback: Boolean)=created.resumption()
+            }).build()
         AudioFocus.onChanged = { created.refresh() }
         refresh = { created.refresh() }
         val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
@@ -56,41 +63,50 @@ class PlaybackService : MediaSessionService() {
         }
         created.refresh()
         scope.launch {
-            var artTrack = Long.MIN_VALUE
-            while (isActive) {
-                delay(250)
+            var artworkJob: kotlinx.coroutines.Job?=null
+            var artIdentity=""
+            while(isActive) {
                 created.refresh()
-                val track = runCatching { FoliaApp.from(this@PlaybackService).bridge.status().trackId }.getOrNull() ?: continue
-                if (track == artTrack) {
-                    continue
-                }
-                artTrack = track
-                created.setArtwork(track, null)
-                launch(Dispatchers.IO) {
-                    var bytes: ByteArray? = null
-                    var attempt = 0
-                    while (attempt < 40 && bytes == null) {
-                        bytes = runCatching { FoliaApp.from(this@PlaybackService).bridge.artwork() }.getOrNull()
-                        if (bytes == null) {
-                            delay(150)
+                val snapshot=withContext(Dispatchers.IO) {runCatching {FoliaApp.from(this@PlaybackService).bridge.status()}.getOrNull()}
+                if(snapshot!=null) {
+                    val ongoing=snapshot.state==io.github.techuouo520.folia.bridge.TransportState.PLAYING||snapshot.loading
+                    if(ongoing&&!wakeLock.isHeld) wakeLock.acquire()
+                    if(!ongoing&&wakeLock.isHeld) wakeLock.release()
+                    val key="${snapshot.trackId}:${snapshot.provider}:${snapshot.onlineId}"
+                    if(key!=artIdentity) {
+                        artIdentity=key;artworkJob?.cancel();created.setArtwork(snapshot.trackId,null)
+                        artworkJob=launch {
+                            repeat(80) {
+                                val result=withContext(Dispatchers.IO) {
+                                    val bridge=FoliaApp.from(this@PlaybackService).bridge
+                                    runCatching {val bytes=bridge.artwork();val now=bridge.status();
+                                        if("${now.trackId}:${now.provider}:${now.onlineId}"==key) bytes else null}.getOrNull()
+                                }
+                                if(artIdentity!=key) return@launch
+                                if(result!=null) {created.setArtwork(snapshot.trackId,result);return@launch}
+                                delay(250)
+                            }
                         }
-                        attempt += 1
                     }
-                    val ready = bytes ?: return@launch
-                    if (artTrack != track) {
-                        return@launch
-                    }
-                    // The bytes stay encoded. Media3 and the system decode them off the UI thread.
-                    launch(Dispatchers.Main) { created.setArtwork(track, ready) }
                 }
+                delay(250)
             }
         }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Match SalamPlayer: task dismissal pauses and checkpoints; ordinary backgrounding plays on.
+        scope.launch {
+            withContext(Dispatchers.IO) {runCatching {FoliaApp.from(this@PlaybackService).bridge.pause()}}
+            AudioFocus.clearResume();AudioFocus.abandon();pauseAllPlayersAndStopSelf()
+        }
+    }
+
     override fun onDestroy() {
         scope.cancel()
+        if(wakeLock.isHeld) wakeLock.release()
         refresh = null
         AudioFocus.onChanged = null
         unregisterReceiver(noisy)

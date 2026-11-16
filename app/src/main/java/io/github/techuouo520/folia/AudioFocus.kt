@@ -80,7 +80,8 @@ object AudioFocus {
     }
 
     private fun onTransientLoss(bridge: FoliaBridge) {
-        val playing = bridge.status().state == TransportState.PLAYING
+        val status=bridge.status()
+        val playing = status.state == TransportState.PLAYING || (status.loading&&status.state!=TransportState.PAUSED)
         resumeWhenGained = playing
         restore(bridge)
         if (playing) {

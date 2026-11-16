@@ -23,9 +23,20 @@ import io.github.techuouo520.folia.bridge.PlaybackSnapshot
 import io.github.techuouo520.folia.bridge.RepeatMode
 import io.github.techuouo520.folia.bridge.TransportState
 import java.io.File
+import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import com.google.common.util.concurrent.SettableFuture
+import androidx.media3.session.MediaSession
 
 @UnstableApi
 class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Looper) : SimpleBasePlayer(looper) {
+    private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main.immediate)
+    private val calls=Mutex()
+    private var status: PlaybackSnapshot?=null
+    private var tracks=emptyList<LibraryTrack>()
+    private var refreshing=false
+    private var released=false
     private val appContext = context.applicationContext
     private var cachedGeneration = Long.MIN_VALUE
     private var cachedItems = emptyList<MediaItemData>()
@@ -40,22 +51,40 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
     }
 
     fun refresh() {
-        invalidateState()
+        if(refreshing||released) return
+        refreshing=true
+        scope.launch {
+            try {
+                val result=withContext(Dispatchers.IO) {calls.withLock {
+                    val next=bridge.status()
+                    next to if(next.queueGeneration!=status?.queueGeneration) bridge.queue() else null
+                }}
+                if(!released) {status=result.first;result.second?.let {tracks=it};invalidateState()}
+            } catch(e: Exception) {if(e is CancellationException) throw e;Log.e(TAG,"refresh failed",e)}
+            finally {refreshing=false}
+        }
+    }
+
+    fun resumption(): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+        val future=SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
+        scope.launch {
+            try {
+                val pair=withContext(Dispatchers.IO) {calls.withLock {bridge.status() to bridge.queue()}}
+                status=pair.first;tracks=pair.second;cachedGeneration=Long.MIN_VALUE
+                future.set(MediaSession.MediaItemsWithStartPosition(tracks.mapIndexed {i,t->item(i,t).mediaItem},pair.first.queueIndex.coerceAtLeast(0),(pair.first.positionSeconds*1000).toLong()))
+                invalidateState()
+            } catch(e: Exception) {future.setException(e)}
+        }
+        return future
     }
 
     override fun getState(): State {
-        val status = try {
-            bridge.status()
-        } catch (error: Exception) {
-            Log.e(TAG, "playback status failed", error)
-            return State.Builder()
-                .setPlaybackState(Player.STATE_IDLE)
-                .setPlayerError(PlaybackException(error.message ?: "status", error, PlaybackException.ERROR_CODE_UNSPECIFIED))
-                .build()
-        }
+        val status=this.status ?: return State.Builder().setPlaybackState(Player.STATE_IDLE)
+            .setAvailableCommands(Player.Commands.Builder().add(Player.COMMAND_PLAY_PAUSE).add(Player.COMMAND_SET_MEDIA_ITEM).build()).build()
         val playlist = playlist(status)
         val playbackState = when {
             playlist.isEmpty() -> Player.STATE_IDLE
+            status.loading -> Player.STATE_BUFFERING
             status.state == TransportState.PLAYING || status.state == TransportState.PAUSED -> Player.STATE_READY
             status.state == TransportState.ENDED -> Player.STATE_ENDED
             else -> Player.STATE_IDLE
@@ -63,11 +92,11 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
         val positionMs = (status.positionSeconds * 1000.0).toLong().coerceAtLeast(0L)
         val builder = State.Builder()
             .setAvailableCommands(commands(status, playlist.isNotEmpty()))
-            .setPlayWhenReady(status.state == TransportState.PLAYING, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+            .setPlayWhenReady(status.state == TransportState.PLAYING || (status.loading&&status.state!=TransportState.PAUSED), Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
             .setPlaybackState(playbackState)
             .setRepeatMode(repeatMode(status.repeatMode))
             .setVolume(status.volume.coerceIn(0f, 1f))
-            .setContentPositionMs(PositionSupplier.getConstant(positionMs))
+            .setContentPositionMs(positionMs)
             .setContentBufferedPositionMs(PositionSupplier.getConstant(positionMs))
             .setMaxSeekToPreviousPositionMs(Long.MAX_VALUE / 4)
         if (playlist.isNotEmpty()) {
@@ -77,20 +106,14 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
     }
 
     override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
-        return runBridge {
-            if (playWhenReady) {
-                if (AudioFocus.acquire(appContext, bridge)) {
-                    bridge.play()
-                }
-            } else {
-                AudioFocus.clearResume()
-                bridge.pause()
-                AudioFocus.abandon()
-            }
-        }
+        if(playWhenReady&&!AudioFocus.acquire(appContext,bridge)) return Futures.immediateFailedFuture<Void>(IllegalStateException("Audio focus denied"))
+        if(!playWhenReady) {AudioFocus.clearResume();AudioFocus.abandon()}
+        return runBridge {if(playWhenReady) bridge.play() else bridge.pause()}
     }
 
     override fun handleSeek(mediaItemIndex: Int, positionMs: Long, seekCommand: Int): ListenableFuture<*> {
+        if(seekCommand!=Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM && !AudioFocus.acquire(appContext,bridge))
+            return Futures.immediateFailedFuture<Void>(IllegalStateException("Audio focus denied"))
         return runBridge {
             when (seekCommand) {
                 Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> bridge.next()
@@ -109,7 +132,16 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
         }
     }
 
-    override fun handleRelease(): ListenableFuture<*> = handleStop()
+    override fun handleRelease(): ListenableFuture<*> {
+        released=true;scope.cancel();return Futures.immediateVoidFuture()
+    }
+
+    override fun handleSetMediaItems(mediaItems: List<MediaItem>,startIndex: Int,startPositionMs: Long): ListenableFuture<*> = runBridge {
+        // MediaSession resumption refers to the queue already restored by the Rust owner.
+        val current=bridge.status()
+        if(startIndex>=0&&startIndex!=current.queueIndex) throw IllegalArgumentException("Restored queue index changed")
+        if(startPositionMs!=C.TIME_UNSET) bridge.seek(startPositionMs/1000.0)
+    }
 
     override fun handleSetRepeatMode(repeatMode: Int): ListenableFuture<*> {
         return runBridge {
@@ -132,7 +164,7 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
             return if (status.queueLength == 0) emptyList() else cachedItems
         }
         val built = try {
-            bridge.queue().mapIndexed { index, track -> item(index, track) }
+            tracks.mapIndexed { index, track -> item(index, track) }
         } catch (error: Exception) {
             Log.e(TAG, "queue read failed", error)
             return cachedItems
@@ -168,6 +200,7 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
     private fun commands(status: PlaybackSnapshot, hasPlaylist: Boolean): Player.Commands {
         val builder = Player.Commands.Builder()
             .add(Player.COMMAND_PLAY_PAUSE)
+            .add(Player.COMMAND_SET_MEDIA_ITEM)
             .add(Player.COMMAND_STOP)
             .add(Player.COMMAND_GET_CURRENT_MEDIA_ITEM)
             .add(Player.COMMAND_GET_TIMELINE)
@@ -188,12 +221,12 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
     }
 
     private fun runBridge(block: () -> Unit): ListenableFuture<*> {
-        try {
-            block()
-        } catch (error: Exception) {
-            Log.e(TAG, "playback command failed", error)
+        val future=SettableFuture.create<Void>()
+        scope.launch {
+            try {withContext(Dispatchers.IO) {calls.withLock {block()}};refresh();future.set(null)}
+            catch(e: Exception) {Log.e(TAG,"playback command failed",e);future.setException(e)}
         }
-        return Futures.immediateVoidFuture()
+        return future
     }
 
     private fun repeatMode(mode: RepeatMode): Int {

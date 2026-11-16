@@ -161,14 +161,6 @@ pub struct LyricSnapshot {
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
-pub struct EqualizerSnapshot {
-    pub enabled: bool,
-    pub preset: String,
-    pub gains: Vec<f32>,
-    pub presets: Vec<String>,
-}
-
-#[derive(Clone, Debug, uniffi::Record)]
 pub struct PlatformInfo {
     pub id: String,
     pub name: String,
@@ -206,11 +198,15 @@ pub enum SessionPhase {
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
+pub struct AudioOutputSnapshot { pub token:i64,pub session:i32,pub device:i32,pub ready:bool,pub error:i32 }
+
+#[derive(Clone, Debug, uniffi::Record)]
 pub struct SessionSnapshot {
     pub phase: SessionPhase,
     pub provider: String,
     pub user_id: String,
     pub nickname: String,
+    pub avatar_url: String,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -299,10 +295,9 @@ impl FoliaBridge {
         let online = online::OnlineHost::start(&dirs.cache)?;
         let covers = covers::CoverHost::start(online.cover_fetcher());
         let artwork = artwork_fetcher(online.cover_fetcher());
-        let playback = playback::PlaybackHost::start(online.audio_fetcher(), online.lyrics_fetcher(), artwork)?;
+        let playback = playback::PlaybackHost::start(online.audio_fetcher(), online.lyrics_fetcher(), artwork, dirs.config.join("playback-resume.json"))?;
         playback.set_volume(settings.volume())?;
         playback.set_repeat(repeat_mode(settings.repeat()))?;
-        playback.set_equalizer(settings.equalizer())?;
         playback.set_quality(settings.audio_quality())?;
         online.restore(settings.online_provider());
         tracing::info!(data = %dirs.data.display(), "bridge initialized");
@@ -412,6 +407,10 @@ impl FoliaBridge {
         Ok(mode)
     }
 
+    pub fn enqueue_next(&self, tracks: Vec<LibraryTrack>) -> Result<(), BridgeError> {
+        self.playback.enqueue_next(tracks)
+    }
+
     pub fn queue(&self) -> Result<Vec<LibraryTrack>, BridgeError> {
         self.playback.queue()
     }
@@ -469,42 +468,12 @@ impl FoliaBridge {
         self.playback.set_quality(self.settings.audio_quality())
     }
 
-    pub fn equalizer(&self) -> EqualizerSnapshot {
-        let settings = self.settings.equalizer();
-        EqualizerSnapshot {
-            enabled: settings.enabled,
-            preset: settings.preset,
-            gains: settings.gains.to_vec(),
-            presets: self.settings.preset_ids(),
-        }
+    pub fn audio_output(&self) -> AudioOutputSnapshot {
+        let(token,session,device,ready,error)=folia_player::bass::status();
+        AudioOutputSnapshot{token:token as i64,session,device,ready,error}
     }
-
-    pub fn set_equalizer_enabled(&self, enabled: bool) -> Result<(), BridgeError> {
-        let mut settings = self.settings.equalizer();
-        settings.enabled = enabled;
-        self.store_equalizer(settings)
-    }
-
-    pub fn set_equalizer_preset(&self, id: String) -> Result<(), BridgeError> {
-        let mut settings = self.settings.equalizer();
-        if let Some(preset) = folia_core::preset(&id) {
-            settings.preset = preset.id.to_owned();
-            settings.gains = preset.gains;
-            settings.effects = preset.effects;
-            settings.enabled = true;
-        }
-        self.store_equalizer(settings)
-    }
-
-    pub fn set_equalizer_gain(&self, index: i32, gain_db: f32) -> Result<(), BridgeError> {
-        let mut settings = self.settings.equalizer();
-        if let Some(slot) = usize::try_from(index).ok().and_then(|index| settings.gains.get_mut(index)) {
-            *slot = gain_db;
-        }
-        settings.preset = "custom1".to_owned();
-        settings.gains = folia_core::EqualizerSettings::normalized_gains(&settings.gains);
-        self.store_equalizer(settings)
-    }
+    pub fn set_audio_headroom_ready(&self,token:i64,ready:bool){folia_player::bass::ready(token as u64,ready);}
+    pub fn set_bass_processing(&self,enabled:bool,strength:f32,quiet:f32,noisy:f32){folia_player::bass::configure(enabled,strength,quiet,noisy);}
 
     pub fn platforms(&self) -> Vec<PlatformInfo> {
         self.online
@@ -558,6 +527,7 @@ impl FoliaBridge {
             provider: view.provider,
             user_id: view.user_id,
             nickname: view.nickname,
+            avatar_url: view.avatar_url,
         }
     }
 
@@ -660,11 +630,6 @@ impl FoliaBridge {
 }
 
 impl FoliaBridge {
-    fn store_equalizer(&self, settings: folia_core::EqualizerSettings) -> Result<(), BridgeError> {
-        self.settings.set_equalizer(settings.clone())?;
-        self.playback.set_equalizer(settings)
-    }
-
     fn provider_id(&self) -> String {
         let session = self.online.session();
         if session.provider.is_empty() { "netease".to_owned() } else { session.provider }
@@ -846,3 +811,6 @@ pub(crate) fn init_tracing() {
         let _ = tracing_subscriber::fmt().with_env_filter(filter).with_target(true).try_init();
     });
 }
+
+// Keep the imported spatial JNI exports in the Android bridge shared library.
+extern crate folia_spatial;

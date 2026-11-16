@@ -1,7 +1,7 @@
-// The settings the phone reads and writes: language, the home tab, playback, theme and the equalizer.
-use folia_core::{AudioQuality, EqualizerSettings, Language, LanguagePreference, Repeat, SOUND_PRESETS};
+// The settings the phone reads and writes: language, the home tab, playback, theme.
+use folia_core::{AudioQuality, Language, LanguagePreference, Repeat};
 use folia_i18n::{I18n, I18nError};
-use folia_store::{AppearanceSettings, AudioSettings, GeneralSettings, HomeTab, PlaybackSettings, Store, ThemeMode};
+use folia_store::{AppearanceSettings, GeneralSettings, HomeTab, PlaybackSettings, Store, ThemeMode};
 use parking_lot::Mutex;
 
 use crate::BridgeError;
@@ -11,7 +11,6 @@ pub(crate) struct SettingsHost {
     general: Mutex<GeneralSettings>,
     playback: Mutex<PlaybackSettings>,
     appearance: Mutex<AppearanceSettings>,
-    audio: Mutex<AudioSettings>,
     locale: Mutex<String>,
     i18n: Mutex<I18n>,
 }
@@ -22,14 +21,12 @@ impl SettingsHost {
         let general = store.load_or_default::<GeneralSettings>();
         let playback = store.load_or_default::<PlaybackSettings>();
         let appearance = store.load_or_default::<AppearanceSettings>();
-        let audio = store.load_or_default::<AudioSettings>();
         let i18n = I18n::new(Language::En).map_err(i18n_err)?;
         Ok(Self {
             store,
             general: Mutex::new(general),
             playback: Mutex::new(playback),
             appearance: Mutex::new(appearance),
-            audio: Mutex::new(audio),
             locale: Mutex::new(String::new()),
             i18n: Mutex::new(i18n),
         })
@@ -136,20 +133,6 @@ impl SettingsHost {
         self.playback.lock().audio_quality = quality;
         let saved = self.playback.lock().clone();
         self.store.save(&saved).map_err(store_err)
-    }
-
-    pub(crate) fn equalizer(&self) -> EqualizerSettings {
-        self.audio.lock().equalizer.clone().clamped()
-    }
-
-    pub(crate) fn set_equalizer(&self, equalizer: EqualizerSettings) -> Result<(), BridgeError> {
-        self.audio.lock().equalizer = equalizer.clamped();
-        let saved = self.audio.lock().clone();
-        self.store.save(&saved).map_err(store_err)
-    }
-
-    pub(crate) fn preset_ids(&self) -> Vec<String> {
-        SOUND_PRESETS.iter().map(|preset| preset.id.to_owned()).collect()
     }
 
     fn save_general(&self) -> Result<(), BridgeError> {
