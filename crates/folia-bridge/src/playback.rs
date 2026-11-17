@@ -78,6 +78,7 @@ struct Playback {
     lyrics_fetch: LyricsFetch,
     checkpoint: PathBuf,
     last_save: std::time::Instant,
+    last_checkpoint: Option<Vec<u8>>,
     position_on_load: f64,
     restored: bool,
     want_play: bool,
@@ -105,6 +106,7 @@ impl Playback {
             audio_fetch,
             lyrics_fetch,
             checkpoint, last_save:std::time::Instant::now(),
+            last_checkpoint: None,
             position_on_load:0.0, restored:false, want_play:false, recovering:false,
         }
     }
@@ -117,21 +119,39 @@ impl Playback {
             self.generation=self.generation.wrapping_add(1);
         }
     }
-    fn save(&mut self,force:bool) {
-        if !force && self.last_save.elapsed()<std::time::Duration::from_secs(2) {return}
-        self.last_save=std::time::Instant::now();
-        let Some(index)=self.queue.current_index() else {return};
-        let state=ResumeState{version:1,tracks:self.queue.items().to_vec(),index,
-            position:self.snapshot().position_seconds,repeat:self.queue.repeat};
-        let result=(|| -> Result<(),Box<dyn std::error::Error>> {
-            let bytes=serde_json::to_vec(&state)?;
-            if let Some(parent)=self.checkpoint.parent(){std::fs::create_dir_all(parent)?;}
-            let temporary=self.checkpoint.with_extension("tmp");
+    fn save(&mut self, force: bool) {
+        if !force && self.last_save.elapsed() < std::time::Duration::from_secs(2) {
+            return;
+        }
+        self.last_save = std::time::Instant::now();
+        let Some(index) = self.queue.current_index() else { return };
+        let state = ResumeState {
+            version: 1,
+            tracks: self.queue.items().to_vec(),
+            index,
+            position: self.snapshot().position_seconds,
+            repeat: self.queue.repeat,
+        };
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let bytes = serde_json::to_vec(&state)?;
+            if self.last_checkpoint.as_deref() == Some(bytes.as_slice()) {
+                return Ok(());
+            }
+            if let Some(parent) = self.checkpoint.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let temporary = self.checkpoint.with_extension("tmp");
             use std::io::Write;
-            let mut file=std::fs::File::create(&temporary)?;file.write_all(&bytes)?;file.sync_all()?;
-            std::fs::rename(temporary,&self.checkpoint)?;Ok(())
+            let mut file = std::fs::File::create(&temporary)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            std::fs::rename(temporary, &self.checkpoint)?;
+            self.last_checkpoint = Some(bytes);
+            Ok(())
         })();
-        if let Err(error)=result {tracing::warn!(%error,"playback checkpoint failed");}
+        if let Err(error) = result {
+            tracing::warn!(%error, "playback checkpoint failed");
+        }
     }
 
     // Mutate queue ownership on the playback thread without restarting the current decoder.

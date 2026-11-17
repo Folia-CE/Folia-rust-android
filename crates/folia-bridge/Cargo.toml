@@ -41,6 +41,8 @@ ndk = "0.9"
 raw-window-handle = "0.6"
 jni.workspace = true
 ndk-context.workspace = true
+# QuickJS needs generated bindings for Android; unify this feature with folia-omni.
+rquickjs = { workspace = true, features = ["bindgen"] }
 rustls-platform-verifier = "=0.7.1"
 
 # UniFFI and the Android context JNI need unsafe. The rest of the workspace forbids it.

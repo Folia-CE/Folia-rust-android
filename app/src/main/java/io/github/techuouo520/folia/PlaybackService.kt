@@ -45,6 +45,11 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
         val created = FoliaPlayer(this, FoliaApp.from(this).bridge, Looper.getMainLooper())
+        created.onSnapshot = { snapshot ->
+            val ongoing = snapshot.state == io.github.techuouo520.folia.bridge.TransportState.PLAYING || snapshot.loading
+            if (ongoing && !wakeLock.isHeld) wakeLock.acquire()
+            if (!ongoing && wakeLock.isHeld) wakeLock.release()
+        }
         player = created
         setShowNotificationForIdlePlayer(SHOW_NOTIFICATION_FOR_IDLE_PLAYER_ALWAYS)
         val activity=PendingIntent.getActivity(this,0,Intent(this,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -65,13 +70,6 @@ class PlaybackService : MediaSessionService() {
         scope.launch {
             while(isActive) {
                 created.refresh()
-                val snapshot=withContext(Dispatchers.IO) {runCatching {FoliaApp.from(this@PlaybackService).bridge.status()}.getOrNull()}
-                if(snapshot!=null) {
-                    val ongoing=snapshot.state==io.github.techuouo520.folia.bridge.TransportState.PLAYING||snapshot.loading
-                    if(ongoing&&!wakeLock.isHeld) wakeLock.acquire()
-                    if(!ongoing&&wakeLock.isHeld) wakeLock.release()
-
-                }
                 delay(250)
             }
         }

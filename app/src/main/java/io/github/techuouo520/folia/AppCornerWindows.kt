@@ -25,14 +25,20 @@ import io.github.techuouo520.folia.bridge.*
 import io.github.techuouo520.folia.spatial.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlin.math.*
 
 @Composable
 internal fun AppCornerWindows(bridge: FoliaBridge,playerInFront: Boolean,player: @Composable ()->Unit,modifier: Modifier = Modifier,content: @Composable ()->Unit) {
     FoliaApp.from(LocalContext.current).appearanceVersion
     val frost=rememberFrostBackdrop();val dark=LocalFoliaDark.current
-    val session by produceState(SessionSnapshot(SessionPhase.RESOLVING,"","","",""),bridge) {
-        while(isActive){value=withContext(Dispatchers.IO){runCatching {bridge.sessionSnapshot()}.getOrDefault(value)};delay(600)}
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val session by produceState(SessionSnapshot(SessionPhase.RESOLVING,"","","",""),bridge,lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while(isActive){value=withContext(Dispatchers.IO){runCatching {bridge.sessionSnapshot()}.getOrDefault(value)};delay(600)}
+        }
     }
     val avatar by produceState<ImageBitmap?>(null,session.provider,session.userId,session.avatarUrl) {
         value=null

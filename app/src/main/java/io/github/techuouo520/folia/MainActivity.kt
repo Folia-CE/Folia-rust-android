@@ -30,6 +30,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
@@ -46,9 +49,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
-class Shell(
+data class Shell(
     val playback: PlaybackSnapshot,
     val scan: ScanSnapshot,
     val tracks: List<LibraryTrack>,
@@ -130,28 +134,32 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
         }
         return
     }
-    val shell by produceState(initialValue = idleShell(bridge), bridge) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val initialShell = remember(bridge) { idleShell(bridge) }
+    val shell by produceState(initialValue = initialShell, bridge, lifecycle) {
         var tracks = withContext(Dispatchers.IO) { runCatching { bridge.tracks() }.getOrDefault(emptyList()) }
         var sawDone = false
-        while (true) {
-            val next = withContext(Dispatchers.IO) {
-                runCatching {
-                    val scan = bridge.scanSnapshot()
-                    var loaded = tracks
-                    if (scan.phase == ScanPhase.RUNNING) {
-                        sawDone = false
-                    } else if (scan.phase == ScanPhase.DONE && !sawDone) {
-                        loaded = runCatching { bridge.tracks() }.getOrDefault(tracks)
-                        sawDone = true
-                    }
-                    Triple(bridge.status(), scan, loaded)
-                }.getOrNull()
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (isActive) {
+                val next = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val scan = bridge.scanSnapshot()
+                        var loaded = tracks
+                        if (scan.phase == ScanPhase.RUNNING) {
+                            sawDone = false
+                        } else if (scan.phase == ScanPhase.DONE && !sawDone) {
+                            loaded = runCatching { bridge.tracks() }.getOrDefault(tracks)
+                            sawDone = true
+                        }
+                        Triple(bridge.status(), scan, loaded)
+                    }.getOrNull()
+                }
+                if (next != null) {
+                    tracks = next.third
+                    value = Shell(next.first, next.second, tracks)
+                }
+                delay(250)
             }
-            if (next != null) {
-                tracks = next.third
-                value = Shell(next.first, next.second, tracks)
-            }
-            delay(250)
         }
     }
     var route by remember { mutableStateOf("home") }

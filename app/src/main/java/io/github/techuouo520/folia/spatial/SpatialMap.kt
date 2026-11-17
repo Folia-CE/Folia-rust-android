@@ -210,7 +210,7 @@ fun SpatialMap(
             } else drawLayer(underWorld)
         }) {
         Box(Modifier.fillMaxSize().graphicsLayer()) {
-        AndroidView(
+        if (sceneActive) AndroidView(
             factory={ ctx -> TextureView(ctx).apply {
                 isOpaque=true
                 surfaceTextureListener=object: TextureView.SurfaceTextureListener {

@@ -44,5 +44,12 @@ internal class DailySpatialPixels(size: Int,budget: Int) {
         recent.remove(url)?.takeIf { it!==pixels }?.let(free::addLast)
         pixels.position(0);pixels.limit(bytes);recent[url]=pixels
     }
+    // The GL owner calls this after destroying its context; decoder reservations remain counted.
+    @Synchronized fun trim() {
+        allocated -= ready.size + recent.size + free.size
+        ready.clear()
+        recent.clear()
+        free.clear()
+    }
     @Synchronized fun close() { closed=true;ready.clear();recent.clear();free.clear() }
 }

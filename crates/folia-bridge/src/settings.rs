@@ -20,7 +20,10 @@ impl SettingsHost {
         let store = Store::at(config);
         let general = store.load_or_default::<GeneralSettings>();
         let playback = store.load_or_default::<PlaybackSettings>();
-        let appearance = store.load_or_default::<AppearanceSettings>();
+        let appearance = AppearanceSettings::load(&store).unwrap_or_else(|error| {
+            tracing::warn!(error = &error as &dyn std::error::Error, "appearance settings unreadable, using defaults");
+            AppearanceSettings::default()
+        });
         let i18n = I18n::new(Language::En).map_err(i18n_err)?;
         Ok(Self {
             store,

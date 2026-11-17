@@ -47,6 +47,7 @@ import io.github.techuouo520.folia.bridge.LibraryTrack
 import io.github.techuouo520.folia.bridge.SessionPhase
 import io.github.techuouo520.folia.bridge.SessionSnapshot
 import kotlinx.coroutines.Dispatchers
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -85,23 +86,28 @@ internal fun HomePage(
     FoliaApp.from(androidx.compose.ui.platform.LocalContext.current).appearanceVersion
     val tab = remember { bridge.homeTab() }
     var loginOpen by remember { mutableStateOf(false) }
-    val session by produceState(initialValue = SessionSnapshot(SessionPhase.RESOLVING, "", "", "", ""), bridge) {
-        while (isActive) {
-            value = withContext(Dispatchers.IO) { runCatching { bridge.sessionSnapshot() }.getOrDefault(value) }
-            delay(600)
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    val session by produceState(initialValue = SessionSnapshot(SessionPhase.RESOLVING, "", "", "", ""), bridge, lifecycle) {
+        lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (isActive) {
+                value = withContext(Dispatchers.IO) { runCatching { bridge.sessionSnapshot() }.getOrDefault(value) }
+                delay(600)
+            }
         }
     }
-    val home by produceState(initialValue = HomeSnapshot(session, false, "", emptyList(), emptyList()), bridge, tab) {
-        while (isActive) {
-            value = withContext(Dispatchers.IO) {
-                runCatching {
-                    if (tab != "local") {
-                        bridge.beginHome(tab)
-                    }
-                    bridge.homeSnapshot(tab)
-                }.getOrDefault(value)
+    val home by produceState(initialValue = HomeSnapshot(session, false, "", emptyList(), emptyList()), bridge, tab, lifecycle) {
+        lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (isActive) {
+                value = withContext(Dispatchers.IO) {
+                    runCatching {
+                        if (tab != "local") {
+                            bridge.beginHome(tab)
+                        }
+                        bridge.homeSnapshot(tab)
+                    }.getOrDefault(value)
+                }
+                delay(700)
             }
-            delay(700)
         }
     }
     val online = tab != "local"

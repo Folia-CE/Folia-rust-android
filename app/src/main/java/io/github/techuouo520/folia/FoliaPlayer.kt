@@ -44,6 +44,7 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
     private var artwork: ByteArray? = null
     private var artworkSource: PlaybackArtwork? = null
     private var artworkJob: kotlinx.coroutines.Job? = null
+    var onSnapshot: (PlaybackSnapshot) -> Unit = {}
 
     private fun updateArtwork(snapshot: PlaybackSnapshot) {
         val source=snapshot.artSource()
@@ -71,7 +72,14 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
                     val next=bridge.status()
                     next to if(next.queueGeneration!=status?.queueGeneration) bridge.queue() else null
                 }}
-                if(!released) {status=result.first;result.second?.let {tracks=it};updateArtwork(result.first);invalidateState()}
+                if (!released) {
+                    val changed = status != result.first || result.second != null
+                    status = result.first
+                    result.second?.let { tracks = it }
+                    updateArtwork(result.first)
+                    onSnapshot(result.first)
+                    if (changed) invalidateState()
+                }
             } catch(e: Exception) {if(e is CancellationException) throw e;Log.e(TAG,"refresh failed",e)}
             finally {refreshing=false}
         }

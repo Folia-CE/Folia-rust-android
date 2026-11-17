@@ -8,12 +8,15 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-val ndkRevision = "29.0.14206865"
+val ndkRevision = libs.versions.ndk.get()
+val javaVersion = libs.versions.jdk.get().toInt()
+val minimumSdk = libs.versions.minSdk.get().toInt()
 val localProperties = Properties().apply {
     val source = rootProject.file("local.properties")
     if (source.isFile) source.inputStream().use { load(it) }
 }
 val sdkPath = localProperties.getProperty("sdk.dir") ?: providers.environmentVariable("ANDROID_HOME").orNull
+    ?: providers.environmentVariable("ANDROID_SDK_ROOT").orNull
     ?: error("Set sdk.dir in local.properties or ANDROID_HOME for this build")
 
 abstract class RustlsVersion : ValueSource<String, RustlsVersion.Params> {
@@ -58,11 +61,29 @@ val ndkHost = when {
     else -> error("Unsupported NDK host: $hostOs")
 }
 val stripName = if (hostOs.startsWith("windows")) "llvm-strip.exe" else "llvm-strip"
-val llvmStrip = File(sdkPath, "ndk/$ndkRevision/toolchains/llvm/prebuilt/$ndkHost/bin/$stripName")
+val ndkDirectory = File(sdkPath, "ndk/$ndkRevision")
+val ndkToolchain = File(ndkDirectory, "toolchains/llvm/prebuilt/$ndkHost")
+val llvmStrip = File(ndkToolchain, "bin/$stripName")
 // GUI-launched IDEs may not inherit the shell's Rust tool paths.
-val cargoExecutable = localProperties.getProperty("rust.cargo") ?: "cargo"
-val rustPath = localProperties.getProperty("rust.path")
+val configuredPath = localProperties.getProperty("rust.path")
     ?: providers.environmentVariable("PATH").getOrElse("")
+val cargoHome = providers.environmentVariable("CARGO_HOME").orNull
+    ?: File(System.getProperty("user.home"), ".cargo").absolutePath
+val cargoBin = File(cargoHome, "bin")
+val cargoName = if (hostOs.startsWith("windows")) "cargo.exe" else "cargo"
+val cargoCandidates = configuredPath.split(File.pathSeparator).filter(String::isNotBlank)
+    .map { File(it, cargoName) } + File(cargoBin, cargoName)
+val cargoExecutable = localProperties.getProperty("rust.cargo")
+    ?: cargoCandidates.firstOrNull { it.isFile }?.absolutePath
+    ?: cargoName
+val rustPath = (listOfNotNull(File(cargoExecutable).parent, cargoBin.absolutePath) + configuredPath)
+    .distinct().joinToString(File.pathSeparator)
+val ndkLibclang = listOf("bin", "lib", "lib64").map { File(ndkToolchain, it) }.firstOrNull { directory ->
+    listOf("libclang.dll", "libclang.so", "libclang.dylib").any { File(directory, it).isFile }
+}
+val libclangPath = localProperties.getProperty("rust.libclang")
+    ?: providers.environmentVariable("LIBCLANG_PATH").orNull
+    ?: ndkLibclang?.absolutePath
 
 abstract class StageNative : DefaultTask() {
     @get:InputFile
@@ -103,13 +124,13 @@ fun releaseProperty(name: String, alternate: String): String? {
 
 android {
     namespace = "io.github.techuouo520.folia"
-    compileSdk = 37
+    compileSdk = libs.versions.compileSdk.get().toInt()
     ndkVersion = ndkRevision
-    buildToolsVersion = "36.0.0"
+    buildToolsVersion = libs.versions.buildTools.get()
     defaultConfig {
         applicationId = "io.github.techuouo520.folia"
-        minSdk = 26
-        targetSdk = 36
+        minSdk = minimumSdk
+        targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = 1
         versionName = "0.1.0"
         ndk { abiFilters += "arm64-v8a" }
@@ -147,8 +168,8 @@ android {
     }
     buildFeatures { compose = true }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.toVersion(javaVersion)
+        targetCompatibility = JavaVersion.toVersion(javaVersion)
     }
 }
 
@@ -163,9 +184,10 @@ androidComponents.onVariants { variant ->
         workingDir(rootProject.projectDir)
         environment("PATH", rustPath)
         environment("ANDROID_HOME", sdkPath)
-        environment("ANDROID_NDK_HOME", File(sdkPath, "ndk/$ndkRevision").absolutePath)
+        environment("ANDROID_NDK_HOME", ndkDirectory.absolutePath)
+        libclangPath?.let { environment("LIBCLANG_PATH", it) }
         environment("CARGO_TARGET_DIR", rootProject.layout.projectDirectory.dir("target").asFile.absolutePath)
-        val command = mutableListOf(cargoExecutable, "ndk", "-t", "arm64-v8a", "--platform", "26", "build", "--locked", "-p", "folia-bridge", "--lib")
+        val command = mutableListOf(cargoExecutable, "ndk", "-t", "arm64-v8a", "--platform", minimumSdk.toString(), "build", "--locked", "-p", "folia-bridge", "--lib")
         if (release) {
             command += "--release"
         }
@@ -201,7 +223,7 @@ androidComponents.onVariants { variant ->
     variant.sources.kotlin?.addGeneratedSourceDirectory(generateBindings) { it.outputDirectory }
 }
 
-kotlin { jvmToolchain(17) }
+kotlin { jvmToolchain(javaVersion) }
 
 dependencies {
     // SalamPlayer's existing DP vendor-compatibility helper, staged locally (no repository fetch).

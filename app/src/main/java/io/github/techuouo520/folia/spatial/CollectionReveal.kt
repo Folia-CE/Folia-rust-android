@@ -134,8 +134,8 @@ internal fun CollectionReveal(entry: CollectionEntry, active: Boolean, dark: Boo
     val matrix=remember { Matrix() }
     val src=remember { FloatArray(8) }
     val dst=remember { FloatArray(8) }
-    val world=rememberGraphicsLayer()
-    val origin=rememberGraphicsLayer()
+    val world = if (active) rememberGraphicsLayer() else null
+    val origin = if (active) rememberGraphicsLayer() else null
     val geometry=remember {FloatArray(7)}
     val clip=remember {Path()}
     val ground=MaterialTheme.colorScheme.background
@@ -143,6 +143,7 @@ internal fun CollectionReveal(entry: CollectionEntry, active: Boolean, dark: Boo
         translationX=if(active) 0f else size.width*2f
     }.then(if(!active) Modifier.clearAndSetSemantics { } else Modifier)) {
         Box(Modifier.fillMaxSize().drawWithContent {
+            if (world == null || origin == null) return@drawWithContent
             // Parent records only the original native scene and its card labels, never this
             // transition. Both image layers and geometry consume the same reversible progress.
             val p=entry.progress.coerceIn(0f,1f)

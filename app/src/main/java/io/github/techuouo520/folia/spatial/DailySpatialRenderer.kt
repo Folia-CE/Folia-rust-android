@@ -491,6 +491,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             try
             {
                 destroy(false)
+                covers!!.resumeHigh()
                 textureOwner = owner
                 viewWidth = width
                 viewHeight = height
@@ -1827,6 +1828,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         display = EGL14.EGL_NO_DISPLAY
         eglContext = EGL14.EGL_NO_CONTEXT
         eglSurface = EGL14.EGL_NO_SURFACE
+        covers.releaseHigh()
         program = 0
         locations.clear()
         resetAssets()

@@ -54,6 +54,7 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
     private val warmEpoch = AtomicInteger()
     private val dirtyPosted = AtomicBoolean()
     @Volatile private var closed = false
+    @Volatile private var highActive = true
     private var dirty: () -> Unit = {}
     private val notifyDirty = Runnable { dirtyPosted.set(false); if (!closed) dirty() }
 
@@ -63,6 +64,16 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
     fun full(url: String?) = url?.let(pixels::ready)
     fun uploaded(url: String?) { if (url != null) pixels.uploaded(url) }
     fun highPreparation(active: Boolean) = Unit
+
+    fun resumeHigh() = synchronized(pending) { highActive = true }
+
+    fun releaseHigh() = synchronized(pending) {
+        highActive = false
+        for (task in workers.queue.toTypedArray()) {
+            if (task is DecodeJob && task.high && workers.remove(task)) pendingFull.remove(task.url)
+        }
+        pixels.trim()
+    }
 
     fun retainHigh(wanted: Set<String?>) = synchronized(pending) {
         // Cancel queued work, never recycle a buffer still borrowed by the GL upload.
@@ -85,7 +96,7 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
         val work = if (high) pendingFull else pending
         synchronized(pending) {
             // Recheck publication under the admission lock: GL may already borrow it.
-            if (closed || (if (high) pixels.ready(url) != null else previews.get(url) != null)) return
+            if (closed || (high && !highActive) || (if (high) pixels.ready(url) != null else previews.get(url) != null)) return
             if (url in work || unavailable(url)) return
             if (high && (pixels.readyCount() + pendingFull.size + 1) * FULL_BYTES > STAGING_BYTES) return
             if (high && pixels.promote(url)) { changed(); return }
@@ -105,7 +116,7 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
         override fun run() {
             var staging: ByteBuffer? = null
             try {
-                if (closed) return
+                if (closed || (high && !highActive)) return
                 // Reserve pooled upload storage before spending CPU on an HD decode.
                 if (high) staging = pixels.acquire() ?: return
                 val image = decode(url, if (high) SIZE else TILE) ?: return
@@ -113,7 +124,7 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
                     val buffer = checkNotNull(staging)
                     try { image.copyPixelsToBuffer(buffer); buffer.flip() } finally { image.recycle() }
                     synchronized(pending) {
-                        if (closed) return
+                        if (closed || !highActive) return
                         pixels.publish(url, buffer)
                         staging = null
                     }
@@ -125,8 +136,11 @@ internal class DailySpatialCovers(private val source: (String) -> ByteArray?, pr
                     }
                 }
             } finally {
-                staging?.let(pixels::release)
-                synchronized(pending) { (if (high) pendingFull else pending).remove(url) }
+                synchronized(pending) {
+                    staging?.let(pixels::release)
+                    (if (high) pendingFull else pending).remove(url)
+                    if (!highActive) pixels.trim()
+                }
                 // Failed jobs also invalidate demand so the renderer can leave warm-up.
                 changed()
             }

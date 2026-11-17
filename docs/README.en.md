@@ -8,7 +8,7 @@
 
 **The lyrics on the wall, now in your pocket.**
 
-The Android client of [Folia-rust](https://github.com/Techuouo520/Folia-rust). The screens are redesigned for phones; playback, lyrics, online platforms and lyric animations come from the Folia-rust Rust core.
+The Android client of [Folia-rust](https://github.com/Techuouo520/Folia-rust). The screens are redesigned for phones. Lyrics, the library, settings and online providers reuse the Rust core, with playback and rendering integrated through locally maintained Android adaptations.
 
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-c2410c)](../LICENSE)
 [![Rust 1.99](https://img.shields.io/badge/rust-1.99.1-b7410e?logo=rust)](../rust-toolchain.toml)
@@ -22,28 +22,29 @@ The Android client of [Folia-rust](https://github.com/Techuouo520/Folia-rust). T
 ---
 
 > [!NOTE]
-> Local music, the cover wall, NetEase, the equalizer and the notification are wired in. Lyric animations are not. Playback on a device still has to be checked by installing the release APK yourself.
+> Local music, the cover wall, online music, audio effects, notifications and the Monet lyrics page are integrated. Monet combines a Rust/wgpu poster with an Android native animated lyric view.
 
 ## About
 
 Folia-rust rewrote Folia from Electron into a native program. Folia-rust-android brings the same core to phones:
 
-- **Shared core with the desktop**: playback, lyrics, the local library and online platforms are the same Rust code as Folia-rust.
+- **Shared core with the desktop**: core, i18n, lyrics, store, library and omni follow Folia-rust main through Git dependencies, with the commit recorded in Cargo.lock. Android adaptations of player, render and visualizer are maintained in this repository.
 - **Portrait first**: screens are written in Jetpack Compose and laid out for one-handed use.
-- **GPU-drawn lyrics**: lyric animations are drawn by Rust with wgpu onto a `SurfaceView`, with the same WGSL shaders as the desktop.
+- **Combined lyric rendering**: Rust/wgpu draws the Monet poster, cover and spectrum in a `TextureView`. An Android Canvas/Skia view overlays animated words and scrolling lyrics.
 - **Native system features**: the media session, notification controls and the background playback service are wired into Android on the Kotlin side.
 
-## Planned features
+## Feature progress
 
 | Feature | Status |
 |---|:---:|
 | Kotlin calls into the Rust core | ✅ |
 | Local music scanning and library | ✅ |
-| Playback, queue and equalizer | ✅ |
+| Playback, queue and audio effects | ✅ |
 | Background playback, notification, media session | ✅ |
 | Cover-wall home (playlists / radio / explore / albums / local) | ✅ |
 | Lyrics with per-word timing | ✅ |
-| Lyric animation styles | 🚧 |
+| Monet lyrics page (GPU poster / native animated text / spring scrolling) | ✅ |
+| Android page entry points for other lyric styles | 🚧 |
 | Online platform: NetEase Cloud Music | ✅ |
 | Online platforms: KuGou, QQ Music, Bodian, Qishui | 🚧 |
 | Languages: 简体中文, 繁體中文, English, Bahasa Indonesia, Tiếng Việt | ✅ |
@@ -55,11 +56,15 @@ Folia-rust rewrote Folia from Electron into a native program. Folia-rust-android
 | Layer | Choice |
 |---|---|
 | Screens | Kotlin 2.4 + Jetpack Compose |
-| Bridge | uniffi 0.32 (app API), JNI (Android context, and later the `Surface` handed to wgpu) |
-| Lyric rendering | wgpu 27 + iced sub-crates, WGSL |
+| Bridge | UniFFI 0.32.2 (app and lyric data), JNI (context, Surface, frames, input and animation kernels) |
+| Lyric rendering | TextureView + wgpu 27 / iced sub-crates / WGSL, native Canvas/Skia text |
 | Core | Rust 1.99.1, Folia-rust crates |
-| Build | Gradle 9.8 + AGP 9.5, cargo-ndk 4.1.2, NDK 29.0.14206865 |
+| Build | Gradle 9.8.2 + AGP 9.3.0, cargo-ndk 4.1.2, NDK 29.0.14206865 |
 | System versions | minSdk 26 (Android 8.0) / targetSdk 36 / compileSdk 37, arm64-v8a |
+
+## How the lyrics page works
+
+The page currently uses Monet. Rust/wgpu draws the poster, cover and spectrum, while native views adapted from SalamPlayer handle animated words and spring scrolling. Both layers follow playback, with tap-to-seek lyrics and a draggable cover.
 
 ## Download
 
@@ -67,36 +72,27 @@ No release yet; build it yourself as described below. Requires an arm64 device r
 
 ## Building
 
-You need JDK 17, Rust 1.99.1 (pinned by `rust-toolchain.toml`, including `aarch64-linux-android`), [cargo-ndk](https://github.com/bbqsrc/cargo-ndk) 4.1.2, and the Android SDK (platform 37, build-tools 36.0.0, NDK 29.0.14206865).
+You need JDK 17, Rust 1.99.1 with the Android arm64 target, cargo-ndk 4.1.2, Android SDK 37, build-tools 36.0.0 and NDK 29.0.14206865.
 
-```bash
-git clone https://github.com/Techuouo520/Folia-rust-android.git
-cd Folia-rust-android
+Use the [configuration template](../local.properties.example) to fill in SDK and signing settings in `local.properties`. Select JDK 17 as Android Studio's Gradle JDK.
+
+Build the release APK from the repository root.
+
+```powershell
+.\gradlew.bat assembleRelease
 ```
 
-Create `local.properties` in the repo root (not tracked by git) with your SDK path:
-
-```properties
-sdk.dir=C:/Users/<you>/AppData/Local/Android/Sdk
-```
-
-Then build the APKs:
-
-```bash
-./gradlew assembleDebug
-./gradlew assembleRelease
-```
-
-On Windows use `gradlew.bat`. The debug APK is `app/build/outputs/apk/debug/app-debug.apk` and the release APK is `app/build/outputs/apk/release/app-release.apk`. Release turns on R8 and builds Rust with `--release`. To use a release keystore, set `RELEASE_STORE_FILE`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS` and `RELEASE_KEY_PASSWORD` in `local.properties`. Without them the APK is signed with the debug key so it can be installed locally. Do not commit the keystore.
+On macOS/Linux, use `./gradlew assembleRelease`. For a debug build, change the task to `assembleDebug`.
 
 ## Roadmap
 
 - [x] Project skeleton: Gradle, Compose, Rust bridge
 - [x] Local music scanning and playback, background service and notification
-- [x] Cover wall, NetEase QR login and online playback, equalizer, lyric lines
+- [x] Cover wall, NetEase QR login and online playback, audio effects, lyric lines
 - [x] Settings, languages, light and dark theme
 - [x] Release build, R8 and signing
-- [ ] Lyric animations (`SurfaceView` + wgpu)
+- [x] Monet lyrics page (TextureView / wgpu poster and native animated text)
+- [ ] Android page entry points for other lyric styles
 - [ ] Screens for the other online platforms
 
 ## Acknowledgements
