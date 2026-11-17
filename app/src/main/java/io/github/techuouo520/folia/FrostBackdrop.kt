@@ -3,6 +3,8 @@ package io.github.techuouo520.folia
 import androidx.compose.material3.MaterialTheme
 import android.os.Build
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -39,10 +41,20 @@ internal class FrostBackdrop(val source: GraphicsLayer) {
     var position by mutableStateOf(Offset.Zero)
     val revision = mutableLongStateOf(0L)
     var recorded = false
+    private var readers by mutableIntStateOf(0)
+    val needed get() = readers > 0
+
+    @Composable
+    fun observe() {
+        DisposableEffect(this) {
+            readers++
+            onDispose { readers-- }
+        }
+    }
 
     fun sourceFramePresented() {
         // Publishing from source drawing must not make that drawing observe its own clock.
-        Snapshot.withoutReadObservation { revision.longValue += 1 }
+        Snapshot.withoutReadObservation { if (needed) revision.longValue += 1 }
     }
 }
 
@@ -58,7 +70,7 @@ internal fun Modifier.frostSource(backdrop: FrostBackdrop): Modifier {
     return graphicsLayer()
         .onGloballyPositioned { backdrop.position = it.positionInRoot() }
         .drawWithContent {
-            if (drawContext.canvas.nativeCanvas.isHardwareAccelerated) {
+            if (backdrop.needed && drawContext.canvas.nativeCanvas.isHardwareAccelerated) {
                 backdrop.source.record { this@drawWithContent.drawContent() }
                 backdrop.recorded = true
                 drawLayer(backdrop.source)
@@ -72,6 +84,7 @@ internal fun Modifier.frostSource(backdrop: FrostBackdrop): Modifier {
 
 @Composable
 internal fun Modifier.frostedBackdrop(backdrop: FrostBackdrop, dark: Boolean): Modifier {
+    backdrop.observe()
     val filtered = rememberGraphicsLayer()
     var position by remember { mutableStateOf(Offset.Zero) }
     val ground = MaterialTheme.colorScheme.background

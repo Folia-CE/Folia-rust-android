@@ -75,13 +75,15 @@ impl State {
 }
 #[derive(Clone,Copy)]
 struct Command{op:i32,index:i32,a:f32,b:f32}
-struct HitScene{mode:f32,x:f32,y:f32,zoom:f32,width:f32,height:f32,center_y:f32,visible:Vec<(usize,Rect)>,rhine:bool,revision:u32,background:f32,records:Vec<rhine_gpu::HitRecord>}
+struct HitScene{list_y:f32,songs:Vec<f32>,mode:f32,x:f32,y:f32,zoom:f32,width:f32,height:f32,center_y:f32,visible:Vec<(usize,Rect)>,rhine:bool,revision:u32,background:f32,records:Vec<rhine_gpu::HitRecord>}
 impl HitScene{
- fn new()->Self{Self{mode:0.,x:0.,y:0.,zoom:1.,width:0.,height:0.,center_y:0.,visible:Vec::with_capacity(VISIBLE),rhine:false,revision:u32::MAX,background:1.,records:Vec::with_capacity(SLOTS)}}
+ fn new()->Self{Self{list_y:0.,songs:Vec::new(),mode:0.,x:0.,y:0.,zoom:1.,width:0.,height:0.,center_y:0.,visible:Vec::with_capacity(VISIBLE),rhine:false,revision:u32::MAX,background:1.,records:Vec::with_capacity(SLOTS)}}
  fn update(&mut self,s:&State,frame:&[f32]){
   self.rhine=false;self.mode=s.mode.value;self.x=s.x.value;self.y=s.y.value;self.zoom=s.zoom.value;self.width=s.width;self.height=s.height;self.center_y=s.camera().1;
-  self.visible.clear();if frame[ACTION+129]>0.5 {
-   for n in 0..frame[16]as usize{let o=HEADER+n*STRIDE;if frame[o+9]>0.05{self.visible.push((frame[o+7]as usize,Rect{x:frame[o+1],y:frame[o+2],w:frame[o+3],h:frame[o+4]}));}}
+  self.mode=frame[1];self.list_y=frame[20]+8.-frame[21];self.songs.clear();
+  let morphing=self.mode>0. && self.mode<1.;
+  self.visible.clear();if morphing || frame[ACTION+129]>0.5 {
+   for n in 0..frame[16]as usize{let o=HEADER+n*STRIDE;if frame[o+9]>0.001{if morphing {self.songs.push(frame[o]);}self.visible.push((frame[o+7]as usize,Rect{x:frame[o+1],y:frame[o+2],w:frame[o+3],h:frame[o+4]}));}}
   }else{self.visible.extend_from_slice(&s.visible);}
  }
  fn update_rhine(&mut self,frame:&[f32]){
@@ -91,7 +93,60 @@ impl HitScene{
   let revision=frame[23].to_bits();if self.rhine&&self.revision==revision{return}
   self.revision=revision;self.rhine=true;self.mode=frame[1];self.width=frame[9];self.height=frame[10];self.center_y=frame[8];self.background=frame[ACTION+127];self.records.clear();for n in 0..frame[16]as usize{let o=HEADER+n*STRIDE;let mut matrix=[0.;16];matrix.copy_from_slice(&frame[RHINE_POSES+n*16..RHINE_POSES+(n+1)*16]);self.records.push(rhine_gpu::HitRecord{cell:frame[o+7]as usize,matrix,alpha:frame[o+9],owner:frame[ACTION+27]>0.5&&frame[ACTION+23]==n as f32});}
  }
- fn hit(&self,x:f32,y:f32)->i32{if self.rhine{return if self.mode>=0.95{rhine_gpu::hit(&self.records,x,y,(self.width/2.,self.center_y),self.background)}else{-1}}hit_geometry(self.mode,self.x,self.y,self.zoom,self.width,self.height,self.center_y,&self.visible,x,y)}
+ fn hit(&self,x:f32,y:f32)->i32 {
+  if !x.is_finite() || !y.is_finite() || self.mode <= 0. { return -1 }
+  if self.rhine { return rhine_gpu::hit(&self.records,x,y,(self.width/2.,self.center_y),self.background) }
+  if self.mode < 1. { return self.hit_morph(x,y) }
+  hit_geometry(self.mode,self.x,self.y,self.zoom,self.width,self.height,self.center_y,&self.visible,x,y)
+ }
+
+ // Invert the list-to-wall vertex projection at the touch point. A cell's list position
+ // belongs to its song, while its curved position belongs to this particular instance.
+ fn hit_morph(&self, x:f32, y:f32)->i32 {
+  let mode = self.mode;
+  let rx = (self.width * 1.3).max(900.);
+  let ry = (self.height * 1.7).max(1100.);
+  let mix = |a:f32,b:f32| a + (b-a)*mode;
+  let mut nearest = f32::INFINITY;
+  let mut hit = -1;
+  for (&(cell,r), &song) in self.visible.iter().zip(&self.songs) {
+   let project = |u:f32,v:f32| {
+    let ax = (r.x + u*r.w + self.x)*self.zoom/rx;
+    let ay = (r.y + v*r.h + self.y)*self.zoom/ry;
+    let depth = rx*(1.-ax.cos()) + ry*(1.-ay.cos());
+    let p = 1500./(1500.+depth);
+    (mix(42.+54.*u, self.width/2.+rx*ax.sin()*p),
+     mix(self.list_y+72.*song+54.*v, self.center_y+ry*ay.sin()*p), ax, ay, depth)
+   };
+   let (mut u, mut v) = (0.5, 0.5);
+   let (cx, cy, ..) = project(u,v);
+   let radius = mix(54., (r.w+r.h)*self.zoom);
+   if (x-cx).abs()>radius || (y-cy).abs()>radius { continue }
+   for _ in 0..6 {
+    let (px,py,..) = project(u,v);
+    let (dx,dy) = (x-px,y-py);
+    if dx.abs()+dy.abs() < 0.05 { break }
+    let (a,b,..) = project(u+0.01,v);
+    let (c,d,..) = project(u,v+0.01);
+    let (a,b,c,d) = (a-px,b-py,c-px,d-py);
+    let det=a*d-b*c;
+    if det.abs()<1e-7 { break }
+    u += 0.01*(dx*d-dy*c)/det;
+    v += 0.01*(dy*a-dx*b)/det;
+   }
+   if !(0. ..=1.).contains(&u) || !(0. ..=1.).contains(&v) { continue }
+   let (px,py,ax,ay,depth) = project(u,v);
+   if (px-x).abs()+(py-y).abs()>0.5 || (mode>0.01 && ax.abs().max(ay.abs())>1.22) { continue }
+   let radius=mix(12.,6.);
+   let qx=(u-0.5).abs()*mix(54.,r.w)-0.5*mix(54.,r.w)+radius;
+   let qy=(v-0.5).abs()*mix(54.,r.h)-0.5*mix(54.,r.h)+radius;
+   if qx.max(0.).hypot(qy.max(0.))+qx.max(qy).min(0.)<=radius && depth<nearest {
+    hit=cell as i32;
+    nearest=depth;
+   }
+  }
+  hit
+ }
 }
 struct Entry{scene:Mutex<runtime::Runtime>,pending:Mutex<Vec<Command>>,hit:Mutex<HitScene>}
 static STATES:OnceLock<Mutex<HashMap<i64,Arc<Entry>>>>=OnceLock::new();

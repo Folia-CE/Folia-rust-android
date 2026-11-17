@@ -63,8 +63,6 @@ class PlaybackService : MediaSessionService() {
         }
         created.refresh()
         scope.launch {
-            var artworkJob: kotlinx.coroutines.Job?=null
-            var artIdentity=""
             while(isActive) {
                 created.refresh()
                 val snapshot=withContext(Dispatchers.IO) {runCatching {FoliaApp.from(this@PlaybackService).bridge.status()}.getOrNull()}
@@ -72,22 +70,7 @@ class PlaybackService : MediaSessionService() {
                     val ongoing=snapshot.state==io.github.techuouo520.folia.bridge.TransportState.PLAYING||snapshot.loading
                     if(ongoing&&!wakeLock.isHeld) wakeLock.acquire()
                     if(!ongoing&&wakeLock.isHeld) wakeLock.release()
-                    val key="${snapshot.trackId}:${snapshot.provider}:${snapshot.onlineId}"
-                    if(key!=artIdentity) {
-                        artIdentity=key;artworkJob?.cancel();created.setArtwork(snapshot.trackId,null)
-                        artworkJob=launch {
-                            repeat(80) {
-                                val result=withContext(Dispatchers.IO) {
-                                    val bridge=FoliaApp.from(this@PlaybackService).bridge
-                                    runCatching {val bytes=bridge.artwork();val now=bridge.status();
-                                        if("${now.trackId}:${now.provider}:${now.onlineId}"==key) bytes else null}.getOrNull()
-                                }
-                                if(artIdentity!=key) return@launch
-                                if(result!=null) {created.setArtwork(snapshot.trackId,result);return@launch}
-                                delay(250)
-                            }
-                        }
-                    }
+
                 }
                 delay(250)
             }

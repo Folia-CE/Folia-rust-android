@@ -71,13 +71,19 @@ vec4 finishColor(vec3 rgb,float alpha){
   rgb=encodeLinear(linear*(mapped/max(peak,.00001)));
  }return vec4(rgb,alpha);
 }
-vec3 album(vec2 uv){
- uv=clamp(uv,0.,1.);if(v_incident.z>0.)uv.x=1.-uv.x;
+flat in float v_lyrics;
+vec3 coverSample(vec2 uv){
  // Both artwork textures have one mip level and GL_LINEAR filtering. Explicit
  // level zero keeps identical sampling even in the face-only conditional below.
  if(v_art.y>.5)return textureLod(u_covers,vec3(uv,v_art.x),0.).rgb;
  if(v_info.x>.5)return textureLod(u_previews,(v_art.zw+vec2(.5)+uv*63.)/vec2(textureSize(u_previews,0)),0.).rgb;
  return mix(vec3(.90),vec3(.12),u_dark);
+}
+// COVER_LYRICS_CHIP
+vec3 album(vec2 uv){
+ uv=clamp(uv,0.,1.);if(v_incident.z>0.)uv.x=1.-uv.x;
+ vec3 art=coverSample(uv);
+ return v_lyrics>.5?printLyricsChip(uv,art,v_scale):art;
 }
 // Reduce only the refractive displacement when the source footprint is exhausted. Repeating
 // border texels would turn the silhouette into a long stripe; the base scene remains spatial.

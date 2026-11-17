@@ -18,6 +18,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 
@@ -26,7 +27,7 @@ import kotlinx.coroutines.launch
  */
 @Composable
 internal fun PlayerTransport(resource:Int,label:String,enabled:Boolean,onClick:()->Unit,modifier:Modifier,
-    padding:Float=0f,direction:Int=0) {
+    padding:Float=0f,direction:Int=0,compactWeight:Float=0f,available:Boolean=enabled,compactIconHeight:Dp=18.dp) {
     val interaction=remember {MutableInteractionSource()}
     val pressed by interaction.collectIsPressedAsState()
     val press=remember {Animatable(1f)};val nudge=remember {Animatable(0f)}
@@ -60,17 +61,26 @@ internal fun PlayerTransport(resource:Int,label:String,enabled:Boolean,onClick:(
         }
         onClick()
     }) {
-        val inset=padding.dp.toPx();val extent=Size((size.width-2*inset).coerceAtLeast(1f),(size.height-2*inset).coerceAtLeast(1f))
-        translate(nudge.value*extent.width,0f) {
+        val fullExtent=(size.minDimension-2*padding.dp.toPx()).coerceAtLeast(1f)
+        translate(nudge.value*fullExtent,0f) {
             scale(press.value,press.value,center) {
-                fun drawGlyph(painter:androidx.compose.ui.graphics.painter.Painter,glyph:Glyph) {
+                fun drawGlyph(painter:androidx.compose.ui.graphics.painter.Painter,glyph:Glyph,inkHeight:Float) {
                     if(glyph.alpha<=0f) return
-                    scale(glyph.size,glyph.size,center) {translate(inset,inset) {
-                        with(painter){draw(extent,alpha=glyph.alpha*(if(enabled) 1f else .30f),colorFilter=ColorFilter.tint(ink))}
+                    // The three 500-unit viewports have different transparent margins.
+                    val side=playerMix(fullExtent,compactIconHeight.toPx()/inkHeight,compactWeight)
+                    val extent=Size(side,side)
+                    scale(glyph.size,glyph.size,center) {translate(center.x-side/2,center.y-side/2) {
+                        with(painter){draw(extent,alpha=glyph.alpha*(if(available) 1f else .30f),colorFilter=ColorFilter.tint(ink))}
                     }}
                 }
-                if(isPlayPause) {drawGlyph(if(selected==0)play else pause,glyphs[1-selected]);drawGlyph(if(selected==0)pause else play,glyphs[selected])}
-                else drawGlyph(icon,Glyph(1f,1f))
+                if(isPlayPause) {
+                    fun drawState(index:Int) {
+                        if(index==0) drawGlyph(pause,glyphs[0],397.109f/500f)
+                        else drawGlyph(play,glyphs[1],435.811f/500f)
+                    }
+                    drawState(1-selected)
+                    drawState(selected)
+                } else drawGlyph(icon,Glyph(1f,1f),388.053f/500f)
             }
         }
     }

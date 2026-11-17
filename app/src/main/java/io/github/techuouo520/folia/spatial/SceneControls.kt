@@ -3,6 +3,7 @@ package io.github.techuouo520.folia.spatial
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import io.github.techuouo520.folia.avoidPlayer
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -47,7 +48,7 @@ internal fun SceneIcon(glyph: SceneGlyph, label: String, dark: Boolean, rhine: B
     val scale=animateFloatAsState(if(pressed) .91f else 1f,spring(dampingRatio=.9f,stiffness=600f),label="sceneIconPress")
     val ink=if(selected) MaterialTheme.colorScheme.primary else sceneInk(dark)
     val fill=MaterialTheme.colorScheme.surfaceContainer.copy(alpha=.90f)
-    Canvas(modifier.size(48.dp).graphicsLayer { scaleX=scale.value;scaleY=scale.value;alpha=if(enabled) 1f else .32f }
+    Canvas(modifier.size(48.dp).avoidPlayer().graphicsLayer { scaleX=scale.value;scaleY=scale.value;alpha=if(enabled) 1f else .32f }
         .semantics { contentDescription=label }
         .clickable(interactionSource=interaction,indication=null,enabled=enabled,role=Role.Button,onClick=onClick)) {
         val inset=4.dp.toPx();val side=size.width-inset*2

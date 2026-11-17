@@ -175,3 +175,4 @@ pub extern "system" fn Java_io_github_techuouo520_folia_spatial_SpatialNative_na
 }
 
 #[path="particles/lib.rs"] mod particles;
+mod ui_motion;

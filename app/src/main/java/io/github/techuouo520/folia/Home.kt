@@ -23,14 +23,18 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.Color
 import io.github.techuouo520.folia.spatial.SceneLabel
 import androidx.compose.ui.res.stringResource
@@ -59,16 +63,20 @@ internal data class WallItem(
     val section: String,
 )
 
+internal val LocalPlayerCoversPage = staticCompositionLocalOf { false }
+
 @Composable
-fun HomePage(
+internal fun HomePage(
     bridge: FoliaBridge,
     shell: Shell,
     message: String?,
     notificationsGranted: Boolean,
     onRequestNotifications: () -> Unit,
     onOpenPlayer: () -> Unit,
-    playerExpanded: Boolean,
-    onPlayerExpanded: (Boolean)->Unit,
+    playerProgress: androidx.compose.runtime.FloatState,
+    playerFootprint: androidx.compose.ui.unit.Dp,
+    frost: FrostBackdrop,
+    screenCorner: Float,
     onOpenSearch: () -> Unit,
     onPlay: (List<LibraryTrack>, Int) -> Unit,
     onToggle: () -> Unit,
@@ -101,38 +109,48 @@ fun HomePage(
     val items = remember(tab, shell.tracks, home.cards, home.explore, signedIn) {
         wallItems(tab, shell.tracks, home, signedIn)
     }
-    val frost = rememberFrostBackdrop()
+    val pageCovered by remember { derivedStateOf { playerProgress.floatValue > .001f } }
     val hasPlayer = true
-    var playerHeight by remember { mutableIntStateOf(0) }
     val bottomSafe=WindowInsets.safeDrawing.asPaddingValues().calculateBottomPadding()
-    val playerInset = if (hasPlayer) with(LocalDensity.current) { playerHeight.toDp().coerceAtLeast(88.dp+bottomSafe) } else bottomSafe
-    val controlsInset = (if (tab == "local") 64.dp else 0.dp) + (if (message != null) 28.dp else 0.dp)
+    val playerInset = playerFootprint + bottomSafe
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    var controlsInset by remember { mutableStateOf(0.dp) }
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(modifier = Modifier.fillMaxSize()) {
             Box(modifier = Modifier.fillMaxSize().then(if (hasPlayer) Modifier.frostSource(frost) else Modifier)) {
-                    if (online && session.phase != SessionPhase.SIGNED_IN) {
-                        Guest(bridge, session.phase == SessionPhase.RESOLVING) { loginOpen = true }
-                    } else if (items.isEmpty()) {
-                        Text(bridge.t(if (tab == "local") "localMusic.noLocalMusic" else "home.loadingLibrary"), modifier = Modifier.align(Alignment.Center).padding(24.dp))
-                    } else {
-                        val openTile = rememberUpdatedState<(WallItem) -> Unit> { item ->
-                            when (item.kind) {
-                                "song" -> onPlay(shell.tracks, item.index)
-                                "fm" -> onPlay(bridge.personalFm(), 0)
-                                "explore-song" -> onPlay(bridge.exploreTracks(item.section), item.index)
-                                else -> Unit // Collections stay inside the spatial scene.
+                Box(Modifier.fillMaxSize().graphicsLayer {
+                    val p = playerProgress.floatValue
+                    scaleX = playerMix(1f,.85f,playerSmooth(0f,1f,p))
+                    scaleY = scaleX
+                    alpha = 1f-playerSmooth(.1f,.9f,p)
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(screenCorner.dp)
+                    clip = p > 0f
+                }) {
+                    CompositionLocalProvider(LocalPlayerCoversPage provides pageCovered) {
+                        if (online && session.phase != SessionPhase.SIGNED_IN) {
+                            Guest(bridge, session.phase == SessionPhase.RESOLVING) { loginOpen = true }
+                        } else if (items.isEmpty()) {
+                            Text(bridge.t(if (tab == "local") "localMusic.noLocalMusic" else "home.loadingLibrary"), modifier = Modifier.align(Alignment.Center).padding(24.dp))
+                        } else {
+                            val openTile = rememberUpdatedState<(WallItem) -> Unit> { item ->
+                                when (item.kind) {
+                                    "song" -> onPlay(shell.tracks, item.index)
+                                    "fm" -> onPlay(bridge.personalFm(), 0)
+                                    "explore-song" -> onPlay(bridge.exploreTracks(item.section), item.index)
+                                    else -> Unit // Collections stay inside the spatial scene.
+                                }
+                            }
+                            FoliaSpatialWall(bridge, items, shell, { openTile.value(it) }, onPlay, onToggle, action, playerInset + controlsInset, frost::sourceFramePresented)
+                        }
+                        if (LocalCornerNavigation.current?.insideAlbum != true) Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)).padding(bottom = playerInset).avoidPlayer().onSizeChanged { controlsInset = with(density) { it.height.toDp() } }) {
+                            if (tab == "local") LocalTools(bridge, shell, action)
+                            if (message != null) {
+                                Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 16.dp))
                             }
                         }
-                        FoliaSpatialWall(bridge, items, shell, { openTile.value(it) }, onPlay, onToggle, action, playerInset + controlsInset, frost::sourceFramePresented)
                     }
-                    Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)).padding(bottom = playerInset)) {
-                        if (tab == "local") LocalTools(bridge, shell, action)
-                        if (message != null) {
-                            Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 16.dp))
-                        }
-                    }
+                }
             }
-            MusicBar(bridge,shell.playback,frost,playerExpanded,onPlayerExpanded,onToggle,action)
 
         }
     }
@@ -167,12 +185,14 @@ private fun exploreItem(card: ExploreCard): WallItem {
 
 @Composable
 private fun Guest(bridge: FoliaBridge, resolving: Boolean, onLogin: () -> Unit) {
-    Column(modifier = Modifier.fillMaxSize().padding(28.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+    Box(Modifier.fillMaxSize().padding(28.dp), contentAlignment = Alignment.Center) {
+      Column(Modifier.avoidPlayer(), horizontalAlignment = Alignment.CenterHorizontally) {
         Text(bridge.t(if (resolving) "home.loading" else "libraryBravaisHome.wallHint.guestTitle"), style = MaterialTheme.typography.titleLarge)
         if (!resolving) {
             Text(bridge.t("libraryBravaisHome.connect"), modifier = Modifier.padding(top = 12.dp))
             Button(onClick = onLogin, modifier = Modifier.padding(top = 16.dp)) { Text(bridge.t("libraryBravaisHome.connect")) }
         }
+      }
     }
 }
 

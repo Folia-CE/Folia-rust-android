@@ -34,6 +34,7 @@ internal object DailySpatialProtocol {
     const val BOUNDS:Int = 6
     const val BLUR_RADIUS:Int = 20
     const val CORNER_RADIUS:Int = 21
+    const val PLAYING_CELL:Int = 22
     const val OWNER_SLOT:Int = 23
     const val LIFT_MIX:Int = 24
     const val CAPTURE_HOLD:Int = 26
@@ -48,6 +49,7 @@ internal object DailySpatialProtocol {
     const val STYLE_ALPHA:Int = 128 // Runtime-owned nonlinear style handoff; independent of list mode.
     const val ARRIVAL_ACTIVE:Int = 129 // Collection card admission gates artwork demand.
     const val ARRIVAL_REVISION:Int = 130 // Changes when new spatial cells are admitted.
+    const val PLAYING_OPEN_PROGRESS:Int = 191
     const val CLOSED:Int = 0
     const val MENU:Int = 1
     const val CONFIRM:Int = 2

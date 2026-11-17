@@ -18,13 +18,12 @@ import io.github.techuouo520.folia.spatial.*
 /** The contents of a collection are another native spatial world, never a list page. */
 @Composable
 internal fun CollectionDetail(bridge: FoliaBridge, cache: CollectionCache, item: SpatialItem, style: Int, interactive: Boolean, active: Boolean, expanded: Boolean,
-    shell: Shell, bottomInset: Dp, fallbackCover: String, onReady: (Boolean)->Unit, onFramePresented: ()->Unit,
+    shell: Shell, bottomInset: Dp, fallbackCover: String, onFramePresented: ()->Unit,
     onPlay: (List<LibraryTrack>,Int)->Unit, onToggle: ()->Unit, action: (() -> Unit)->Unit) {
     val key=item.key
     val dark=LocalFoliaDark.current
     val rhine=style==1
     val titleBackdrop=rememberFrostBackdrop()
-    val ready=rememberUpdatedState(onReady)
     DisposableEffect(cache,key) {
         cache.pin(key);cache.request(key,item.name,fallbackCover)
         onDispose {cache.unpin(key)}
@@ -64,6 +63,7 @@ internal fun CollectionDetail(bridge: FoliaBridge, cache: CollectionCache, item:
             bytes
         }
     } }
+    var albumVisible by remember(key) { mutableStateOf(false) }
     val playback=shell.playback
     val playingKey=remember(visible,catalogue,playback.provider,playback.onlineId,playback.trackId) {
         visible.firstOrNull { cell ->
@@ -72,17 +72,18 @@ internal fun CollectionDetail(bridge: FoliaBridge, cache: CollectionCache, item:
             else track.id==playback.trackId
         }?.key
     }
-    LaunchedEffect(page.loading,page.error,visible.isEmpty()) {
-        // Empty/error states keep the parent world visible and still allow return/retry.
-        if(!page.loading && visible.isEmpty()) ready.value(true)
-    }
     Box(Modifier.fillMaxSize()) {
         // Only the live map/Rhine scene enters the title blur, never the title itself.
         Box(Modifier.fillMaxSize().frostSource(titleBackdrop)) {
         SpatialMap(
+            albumContent={ selected ->
+                val track = indices.value[selected]?.let { tracks.value.getOrNull(it) }
+                MonetLyrics(bridge, playback, dark, track != null && track.artOwner() == playback.artSource()?.owner, active = active)
+            },
+            onAlbumVisible={ albumVisible=it },
             items=visible,dark=dark,playingKey=playingKey,playing=playback.state==TransportState.PLAYING,
             source=source,initialStyle=style,chrome=false,expansionComplete=expanded,interactive=interactive,sceneActive=active,bottomInset=bottomInset,
-            onSceneReady={ready.value(true)},onSceneLost={ready.value(false)},onFramePresented={titleBackdrop.sourceFramePresented();onFramePresented()},
+            onFramePresented={titleBackdrop.sourceFramePresented();onFramePresented()},
             onPlay={ cell -> indices.value[cell.key]?.let {onPlay(tracks.value,it)} },onToggle=onToggle,
             onNext={ cell -> indices.value[cell.key]?.let {index -> action {bridge.enqueueNext(listOf(tracks.value[index]))} } },
             isFavorite={ cell -> identity(page.tracks[catalogue.getValue(cell)]) in favorites },
@@ -97,7 +98,7 @@ internal fun CollectionDetail(bridge: FoliaBridge, cache: CollectionCache, item:
             },
         )
         }
-        CollectionHeading(page.title.ifBlank {item.name},"${page.tracks.size}  /  ${item.singer}",dark,titleBackdrop)
+        if (!albumVisible) CollectionHeading(page.title.ifBlank {item.name},"${page.tracks.size}  /  ${item.singer}",dark,titleBackdrop)
         if(visible.isEmpty()) Column(Modifier.align(Alignment.Center).padding(28.dp),horizontalAlignment=Alignment.CenterHorizontally,
             verticalArrangement=Arrangement.spacedBy(12.dp)) {
             if(page.loading) {if(active) SceneLoading(dark)}

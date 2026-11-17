@@ -20,6 +20,7 @@ out vec2 v_uv;
 out vec2 v_size;
 out vec2 v_angles;
 flat out vec4 v_info;
+flat out float v_lyrics;
 flat out vec4 v_preview;
 flat out vec4 v_material;
 out vec3 v_normal;
@@ -41,7 +42,7 @@ void main(){
  w=mix(w,1.,clamp(lift,0.,1.));
  vec2 ndc=vec2(screen.x/u_screen.x*2.0-1.0,1.0-screen.y/u_screen.y*2.0);
  gl_Position=vec4(ndc*w,clamp(-depth/1800.0,0.0,.95)*u_mode*w,w);
- v_uv=a_uv;v_size=mix(vec2(54.0),a_rect.zw,u_mode);v_angles=angles;v_info=a_info;v_preview=a_preview;
+ v_uv=a_uv;v_size=mix(vec2(54.0),a_rect.zw,u_mode);v_angles=angles;v_info=a_info;v_lyrics=step(1.5,a_info.w);v_info.w-=2.*v_lyrics;v_preview=a_preview;
  v_material=a_material;
  v_normal=normalize(mix(vec3(sn,cs.x*cs.y),vec3(0.,0.,1.),clamp(lift,0.,1.)));
  v_shade=.94+.06*max(0.0,dot(v_normal,vec3(-.1732,-.2117,.9622)));

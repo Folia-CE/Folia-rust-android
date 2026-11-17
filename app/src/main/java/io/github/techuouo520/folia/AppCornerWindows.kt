@@ -28,7 +28,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlin.math.*
 
 @Composable
-internal fun AppCornerWindows(bridge: FoliaBridge,content: @Composable ()->Unit) {
+internal fun AppCornerWindows(bridge: FoliaBridge,playerInFront: Boolean,player: @Composable ()->Unit,modifier: Modifier = Modifier,content: @Composable ()->Unit) {
     FoliaApp.from(LocalContext.current).appearanceVersion
     val frost=rememberFrostBackdrop();val dark=LocalFoliaDark.current
     val session by produceState(SessionSnapshot(SessionPhase.RESOLVING,"","","",""),bridge) {
@@ -48,6 +48,7 @@ internal fun AppCornerWindows(bridge: FoliaBridge,content: @Composable ()->Unit)
     }
     val navigation=remember {CornerNavigation()}
     var backPressed by remember {mutableStateOf(false)}
+    val turn = remember { floatArrayOf(0f,0f,0f,1f,90f) }
     val dockMotion=remember {CornerMotion().apply {bounds(CORNER_BUTTON_DIAMETER,CORNER_BUTTON_DIAMETER*2,false)}}
     var owner by remember {mutableStateOf<String?>(null)}
     var requested by remember {mutableStateOf<String?>(null)}
@@ -58,7 +59,7 @@ internal fun AppCornerWindows(bridge: FoliaBridge,content: @Composable ()->Unit)
     val accountMotion=remember {CornerMotion()}
     val settingsMotion=remember {CornerMotion()}
     LaunchedEffect(Unit) {
-        snapshotFlow {listOf(requested,accountPressed,settingsPressed,backPressed,navigation.expanded,layoutSignal)}.collectLatest {
+        snapshotFlow {listOf(requested,accountPressed,settingsPressed,backPressed,navigation.expanded,navigation.insideAlbum,layoutSignal)}.collectLatest {
             if(owner==null && requested!=null) owner=requested
             var last=withFrameNanos{it}
             do {
@@ -66,10 +67,14 @@ internal fun AppCornerWindows(bridge: FoliaBridge,content: @Composable ()->Unit)
                 withFrameNanos {now->
                     val dt=(now-last)/1e9f;last=now
                     val dockMoving=dockMotion.step(navigation.expanded,dt)
-                    accountMotion.dockBounds(dockMotion.rect())
+                    val turning = MotionKernel.backDock(turn,navigation.insideAlbum,dt)
+                    val dock = dockMotion.rect()
+                    val reach = (dock.height-CORNER_BUTTON_DIAMETER).coerceAtLeast(0f)
+                    accountMotion.dockBounds(dock.copy(right=dock.right+reach*turn[2],
+                        bottom=dock.top+CORNER_BUTTON_DIAMETER+reach*turn[3]))
                     val a=accountMotion.step(owner=="account"&&requested==owner,dt,accountPressed||backPressed)
                     val s=settingsMotion.step(owner=="settings"&&requested==owner,dt,settingsPressed)
-                    moving=a||s||dockMoving
+                    moving=a||s||dockMoving||turning
                     if(owner!=null && requested!=owner && (if(owner=="account") accountMotion else settingsMotion).docked) {
                         owner=requested
                         moving=moving||owner!=null
@@ -79,11 +84,14 @@ internal fun AppCornerWindows(bridge: FoliaBridge,content: @Composable ()->Unit)
             }while(moving)
         }
     }
-    SideEffect {navigation.modalOpen=owner!=null}
-    BackHandler(owner!=null){requested=null}
-    Box(Modifier.fillMaxSize()) {
-        Box(Modifier.fillMaxSize().frostSource(frost)) {
-            CompositionLocalProvider(LocalCornerNavigation provides navigation) {content()}
+    LaunchedEffect(playerInFront) { if(playerInFront) requested=null }
+    SideEffect {navigation.modalOpen=owner!=null && !playerInFront}
+    PinMusicBarSide(owner != null || requested != null || settingsPressed)
+    BackHandler(owner!=null && !playerInFront){requested=null}
+    CompositionLocalProvider(LocalCornerNavigation provides navigation) {
+      Box(Modifier.fillMaxSize()) {
+        Box(modifier.fillMaxSize().frostSource(frost)) {
+            content()
         }
         if(owner!=null) Canvas(Modifier.fillMaxSize().zIndex(1f).pointerInput(Unit){detectTapGestures{requested=null}}) {
             frame.intValue
@@ -94,14 +102,15 @@ internal fun AppCornerWindows(bridge: FoliaBridge,content: @Composable ()->Unit)
                 val right=name=="settings"
                 // Separate root siblings: the modal scrim covers both idle buttons; the active
                 // window remains above the scrim, its sibling button, the player and the scene.
-                Box(Modifier.fillMaxSize().zIndex(if(owner==name) 2f else 0f)
+                Box(Modifier.fillMaxSize().then(if(playerInFront) Modifier.clearAndSetSemantics {} else Modifier)
+                    .zIndex(if(owner==name) 2f else 0f)
                     .windowInsetsPadding(WindowInsets.safeDrawing)
                     .padding(start=10.dp,end=10.dp,top=4.dp,bottom=10.dp)) {
                     CornerBubble(
                         modifier=Modifier.align(if(right) Alignment.TopEnd else Alignment.TopStart),
                         motion=if(right) settingsMotion else accountMotion,frame=frame,
                         active=owner==name,right=right,frost=frost,dark=dark,
-                        dockMotion=if(right) null else dockMotion,
+                        dockMotion=if(right) null else dockMotion, backTurn=if(right) null else turn,
                         backEnabled=!right&&navigation.expanded&&owner==null,
                         onBackPressed={backPressed=it},onBack=navigation::back,
                         avatar=if(right) null else avatar,
@@ -117,6 +126,15 @@ internal fun AppCornerWindows(bridge: FoliaBridge,content: @Composable ()->Unit)
                 }
             }
         }
+        // The moving card physically occludes the corners. Only its uncovered surroundings
+        // swallow new touches during travel. At rest the corner sheets can cover the mini bar.
+        Box(Modifier.fillMaxSize().zIndex(if(playerInFront) 3f else 0f)) {
+            if(playerInFront) Box(Modifier.fillMaxSize().pointerInput(Unit) {
+                awaitPointerEventScope { while(true) awaitPointerEvent().changes.forEach { it.consume() } }
+            })
+            player()
+        }
+      }
     }
 }
 

@@ -22,6 +22,7 @@ import kotlin.math.roundToInt
  */
 @Composable
 internal fun Modifier.headerBlur(backdrop: FrostBackdrop): Modifier {
+    backdrop.observe()
     val blurred=rememberGraphicsLayer()
     var position by remember {mutableStateOf(Offset.Zero)}
     return onGloballyPositioned {position=it.positionInRoot()}.drawWithCache {

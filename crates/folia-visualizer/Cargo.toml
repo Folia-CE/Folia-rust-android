@@ -8,6 +8,7 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
+etagere = "=0.2.15"
 flate2.workspace = true
 folia-core.workspace = true
 folia-lyrics.workspace = true
@@ -17,11 +18,18 @@ iced_graphics.workspace = true
 iced_renderer.workspace = true
 iced_widget.workspace = true
 icu_segmenter.workspace = true
+icu_properties = "=2.4.0"
 image.workspace = true
 lyon_path.workspace = true
+lucide-static-svg = "=1.65.0"
+svgtypes = "=0.16.2"
 toml.workspace = true
 tracing.workspace = true
 wgpu.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+iced_wgpu.workspace = true
+tokio = { version = "1", features = ["rt"] }

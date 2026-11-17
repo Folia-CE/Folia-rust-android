@@ -1,33 +1,88 @@
 package io.github.techuouo520.folia
 
-/** SalamPlayer 650ms ATTACK_SMOOTH track; interrupted segments retain the displayed velocity. */
-internal class MusicBarMotion {
-    var value=0f;private set
-    var velocity=0f;private set
-    private var from=0f;private var to=0f;private var elapsed=.65f;private var initialVelocity=0f
-    private val points=doubleArrayOf(0.0,.0041,.8,.82,.86,.9,.98,.982,.985,.987,.992,.996,.999,1.0)
-    private val work=DoubleArray(points.size)
-    fun target(open: Boolean) {
-        val next=if(open) 1f else 0f
-        if(to==next) return
-        from=value;to=next;initialVelocity=velocity;elapsed=0f
-    }
-    fun hold() {elapsed=.65f;to=value}
-    fun drag(progress: Float, dragVelocity: Float=0f) {value=progress.coerceIn(0f,1f);velocity=dragVelocity;elapsed=.65f;to=value}
-    private fun sample(t: Float): Float {
+import kotlin.math.abs
+
+/** BezierControl presets used by NowPlayingBarView. The coefficients are ordinates, not x/y pairs. */
+internal class PlayerBezier(private vararg val points: Double) {
+    private val work = DoubleArray(points.size)
+
+    fun sample(fraction: Float): Float {
+        val t = fraction.coerceIn(0f, 1f).toDouble()
         points.copyInto(work)
-        for(r in 1 until work.size) for(i in 0 until work.size-r) work[i]=(1-t)*work[i]+t*work[i+1]
-        val restSlope=(points.size-1)*(points[1]-points[0]).toFloat()*(to-from)/.65f
-        val carry=if(initialVelocity==0f && (from==0f || from==1f)) 0f else (initialVelocity-restSlope)*.65f*t*(1-t)*(1-t)*(1-t)
-        return (from+(to-from)*work[0].toFloat()+carry).coerceIn(0f,1f)
+        for (last in work.lastIndex downTo 1) {
+            for (i in 0 until last) work[i] = (1 - t) * work[i] + t * work[i + 1]
+        }
+        return work[0].toFloat()
     }
+
+    val startSlope = ((points[1] - points[0]) * points.lastIndex).toFloat()
+}
+
+// These curves are sampled on the UI frame clock.
+internal val playerAttack = PlayerBezier(0.0, .0041, .8, .82, .86, .9, .98, .982, .985, .987, .992, .996, .999, 1.0)
+internal val playerPress = PlayerBezier(0.0, .09, .18, .27, .36, .45, .54, .63, .72, .76, .8, .84, .88, .92, .95, .955, .958, .97, .985, .996, .999, 1.0)
+
+internal fun settleMusicBar(start: Float, progress: Float, travelDp: Float): Boolean =
+    if (start < .5f) travelDp <= -72f || progress >= .5f else travelDp < 72f && progress > .5f
+
+internal class MusicBarMotion {
+    var value = 0f
+        private set
+    var velocity = 0f
+        private set
+    private val duration = .65f
+    private var from = 0f
+    private var to = 0f
+    private var elapsed = duration
+    private var tangent = 0f
+    val moving get() = elapsed < duration
+
+    fun target(open: Boolean) {
+        val next = if (open) 1f else 0f
+        if (to == next) return
+        from = value
+        to = next
+        elapsed = 0f
+        tangent = if (velocity == 0f && (from == 0f || from == 1f)) 0f
+            else velocity * duration - playerAttack.startSlope * (to - from)
+    }
+
+    fun hold() {
+        elapsed = duration
+        to = value
+    }
+
+    fun drag(progress: Float, dragVelocity: Float = 0f) {
+        value = progress.coerceIn(0f, 1f)
+        velocity = if (value == progress && value > 0f && value < 1f) dragVelocity else 0f
+        hold()
+    }
+
+    private fun sample(t: Float): Float {
+        val fraction = playerAttack.sample(t)
+        if (tangent == 0f) return playerMix(from, to, fraction)
+        // Continue along the incoming tangent, within the space left on that side. Advancing
+        // the starting point before blending to the target avoids hitting a clamp or rebounding
+        // on fast same-direction releases. At t=0 the correction's derivative is tangent.
+        val room = if (tangent > 0f) 1f - from else from
+        val displacement = tangent * t
+        val carried = if (room > 0f) room * displacement / (room + abs(displacement)) else 0f
+        return playerMix(from + carried, to, fraction)
+    }
+
     fun step(seconds: Float): Boolean {
-        if(elapsed>=.65f) return false
-        elapsed=(elapsed+seconds.coerceIn(0f,.05f)).coerceAtMost(.65f)
-        val t=elapsed/.65f;value=sample(t)
-        val a=(t-.0005f).coerceAtLeast(0f);val b=(t+.0005f).coerceAtMost(1f)
-        velocity=if(b>a) (sample(b)-sample(a))/((b-a)*.65f) else 0f
-        if(elapsed>=.65f){value=to;velocity=0f;return false}
+        if (!moving) return false
+        elapsed = (elapsed + seconds.coerceAtLeast(0f)).coerceAtMost(duration)
+        if (!moving) {
+            value = to
+            velocity = 0f
+            return false
+        }
+        val t = elapsed / duration
+        value = sample(t)
+        val a = (t - .0001f).coerceAtLeast(0f)
+        val b = (t + .0001f).coerceAtMost(1f)
+        velocity = (sample(b) - sample(a)) / ((b - a) * duration)
         return true
     }
 }
