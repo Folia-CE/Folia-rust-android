@@ -112,7 +112,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
     private var texturesReady:Boolean = false
     private val uploadRetry:Runnable = Runnable { uploadRetryPosted = false
         if (!closed && texturesReady) requestLast() }
-    private var warmAt:Int = 0
+    private var printedLyricsCell = -1
     private var drawnRevision:Float = -1f
     private var backgroundRevision:Float = -1f
     private var backgroundOwner:Int = -2
@@ -496,7 +496,7 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
                 viewHeight = height
                 configureRenderSize(false)
                 create(owner, requestHdr)
-                if(initialArtworkLimit<96) warmPipeline(generation) else warmPreviews(generation)
+                warmPipeline(generation)
             }
             catch (failure:Exception) {
                 fail(failure)
@@ -798,36 +798,6 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
 
     }
 
-    private fun warmPreviews(epoch:Int) {
-        if (closed || epoch != generation || program == 0) return
-        val end = Math.min(Math.min(tracks.size, DailySpatialCovers.INITIAL_PREVIEWS), warmAt + 16)
-        while (warmAt < end)
-        {
-            val asset = trackAssets.get(warmAt)
-            val url = asset!!.url
-            if (url!!.isEmpty()) {
-                warmAt++
-                continue
-            }
-            val slot = previewSlot(asset)
-            val image = covers!!.preview(url)
-            if (image != null && !previewLoaded[slot]) uploadPreview(slot, image)
-            warmAt++
-        }
-        if (warmAt < Math.min(tracks.size, DailySpatialCovers.INITIAL_PREVIEWS))
-        worker!!.postDelayed({ warmPreviews(epoch) }, 4L)
-        else
-        {
-            try
-            {
-                warmPipeline(epoch)
-            }
-            catch (failure:Exception) {
-                fail(failure)
-            }
-
-        }
-    }
     private fun previewSlot(asset:CoverAsset?):Int {
         val found = asset!!.preview
         if (found >= 0) {
@@ -927,6 +897,8 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         val ok = IntArray(1)
         GLES30.glGetProgramiv(program, GLES30.GL_LINK_STATUS, ok, 0)
         if (ok[0] == 0) throw IllegalStateException(GLES30.glGetProgramInfoLog(program))
+        AlbumLyricsChip.upload(requireNotNull(context))
+        AlbumLyricsChip.configure(program)
         for (name in arrayOf<String>("u_screen", "u_center", "u_radius", "u_pan", "u_zoom", "u_mode", "u_header", "u_scroll", "u_dark", "u_accent", "u_covers", "u_previews", "u_layer", "u_lift_rect", "u_lift_mix", "u_lift_radius", "u_linear_output")) locations.put(name, GLES30.glGetUniformLocation(program, name))
         val ids = IntArray(1)
         GLES30.glGenBuffers(1, ids, 0)
@@ -978,7 +950,6 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
         composeRectLocation = GLES30.glGetUniformLocation(composeProgram, "u_scene_rect")
         GLES30.glGenVertexArrays(1, ids, 0)
         fullVao = ids[0]
-        warmAt = 0
         drawnRevision = -1f
         paletteDirty = true
         texturesReady = false
@@ -1007,6 +978,12 @@ internal class DailySpatialRenderer(context:Context?, private val displayDensity
             drawnRevision = -1f
             backgroundRevision = -1f
             rhineContextReady = false
+        }
+        val chipCell = AlbumLyricsChip.cell(frame)
+        if (printedLyricsCell != chipCell) {
+            printedLyricsCell = chipCell
+            drawnRevision = -1f
+            backgroundRevision = -1f
         }
         val count = Math.min(CAPACITY, frame[16].toInt())
         // Manual exploration supersedes a live playback landing plan (its ready callback

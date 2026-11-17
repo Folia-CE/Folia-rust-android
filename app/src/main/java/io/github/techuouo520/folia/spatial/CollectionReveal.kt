@@ -2,8 +2,6 @@ package io.github.techuouo520.folia.spatial
 
 import androidx.compose.material3.MaterialTheme
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -19,17 +17,22 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.CornerRadius
 import kotlinx.coroutines.flow.collectLatest
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import io.github.techuouo520.folia.LocalCornerNavigation
 import kotlin.math.*
+
+internal val LocalCollectionEntry = staticCompositionLocalOf<CollectionEntry?> { null }
 
 internal class CollectionEntry(val item: SpatialItem, val bounds: Rect,
     val style: Int, val corners: List<Offset>) {
     // A new visit is a new intent even when all geometry and the cached world are identical.
     var openRequested by mutableStateOf(true)
     var progress by mutableFloatStateOf(0f)
+    var parentRestored = false
+    val screenToPage = android.graphics.Matrix()
+    var visibleWidth = 0f
+    var visibleHeight = 0f
     val faceWidth=(corners[1]-corners[0]).getDistance().coerceAtLeast(1f)
     val faceHeight=(corners[3]-corners[0]).getDistance().coerceAtLeast(1f)
     val outline=Path().apply {
@@ -99,12 +102,10 @@ internal fun collectionCorners(frame: FloatArray, cell: Int, density: Float, bou
 /** One source card grows into a live native world with coordinated geometry and alpha. */
 @Composable
 internal fun CollectionReveal(entry: CollectionEntry, active: Boolean, dark: Boolean, parentWorld: GraphicsLayer, onClosed: (CollectionEntry)->Unit,
-    onParentTap: (Offset)->Unit,
-    content: @Composable (SpatialItem,Int,Boolean,Boolean,Boolean,(Boolean)->Unit)->Unit) {
+    content: @Composable (SpatialItem,Int,Boolean,Boolean,Boolean)->Unit) {
     val motion=remember(entry.item.key,entry.style) { CollectionMotion(if(entry.style==1) 16.0 else 18.0) }
-    var ready by remember(entry.item.key,entry.style) { mutableStateOf(false) }
     val closed=rememberUpdatedState(onClosed)
-    val interactive by remember(entry,active) { derivedStateOf { active && entry.openRequested && entry.progress==1f && ready } }
+    val interactive by remember(entry,active) { derivedStateOf { active && entry.openRequested } }
     val expanded by remember(entry,active) { derivedStateOf { active && entry.openRequested && entry.progress==1f } }
     val navigation=LocalCornerNavigation.current
     DisposableEffect(navigation,entry,active) {
@@ -112,7 +113,7 @@ internal fun CollectionReveal(entry: CollectionEntry, active: Boolean, dark: Boo
         onDispose {if(active) navigation?.detach(entry)}
     }
     val dismiss={entry.openRequested=false}
-    BackHandler(active && navigation?.modalOpen!=true) { dismiss() }
+    BackHandler(interactive && navigation?.modalOpen!=true) { dismiss() }
     LaunchedEffect(entry,active) {
         snapshotFlow {
             when { !entry.openRequested || !active -> 0.0; else -> 1.0 }
@@ -141,20 +142,17 @@ internal fun CollectionReveal(entry: CollectionEntry, active: Boolean, dark: Boo
     Box(Modifier.fillMaxSize().graphicsLayer {
         translationX=if(active) 0f else size.width*2f
     }.then(if(!active) Modifier.clearAndSetSemantics { } else Modifier)) {
-        Canvas(Modifier.fillMaxSize().pointerInput(entry) {
-            detectTapGestures {point -> if(!entry.openRequested) onParentTap(point)}
-        }) { }
         Box(Modifier.fillMaxSize().drawWithContent {
             // Parent records only the original native scene and its card labels, never this
             // transition. Both image layers and geometry consume the same reversible progress.
-            world.record {this@drawWithContent.drawContent()}
             val p=entry.progress.coerceIn(0f,1f)
-            if(!active || p<=0f || parentWorld.isReleased) return@drawWithContent
-            if(p==1f) {
-                world.alpha=1f
-                drawRect(ground);drawLayer(world)
+            if (active && p == 1f && !parentWorld.isReleased) {
+                drawRect(ground)
+                drawContent()
                 return@drawWithContent
             }
+            world.record {this@drawWithContent.drawContent()}
+            if(!active || p<=0f || parentWorld.isReleased) return@drawWithContent
             CollectionMorph.frame(size.width,size.height,entry.faceWidth,entry.faceHeight,
                 (if(entry.style==1) 1.dp else 6.dp).toPx(),p,geometry)
             val w=geometry[CollectionMorph.CLIP_WIDTH];val h=geometry[CollectionMorph.CLIP_HEIGHT]
@@ -189,6 +187,9 @@ internal fun CollectionReveal(entry: CollectionEntry, active: Boolean, dark: Boo
             }
             if(!nativeMatrix.setPolyToPoly(src,0,dst,0,4)) return@drawWithContent
             nativeMatrix.getValues(values);copyPlanarMatrix(values,matrix)
+            nativeMatrix.invert(entry.screenToPage)
+            entry.visibleWidth = w
+            entry.visibleHeight = h
             clip.reset();clip.addRoundRect(RoundRect(Rect(0f,0f,w,h),CornerRadius(geometry[CollectionMorph.RADIUS])))
             world.alpha=geometry[CollectionMorph.CONTENT_ALPHA]
             origin.alpha=geometry[CollectionMorph.ORIGIN_ALPHA]
@@ -202,12 +203,10 @@ internal fun CollectionReveal(entry: CollectionEntry, active: Boolean, dark: Boo
                 }
             }
         }) {
-            Box(Modifier.fillMaxSize().graphicsLayer()) { content(entry.item,entry.style,interactive,active,expanded,{ready=it}) }
+            CompositionLocalProvider(LocalCollectionEntry provides entry) {
+                Box(Modifier.fillMaxSize().graphicsLayer()) { content(entry.item,entry.style,interactive,active,expanded) }
+            }
         }
-        if(!interactive) Canvas(Modifier.fillMaxSize().pointerInput(entry) {
-            detectTapGestures {point -> if(!entry.openRequested) onParentTap(point)}
-        }) { }
-
     }
 }
 

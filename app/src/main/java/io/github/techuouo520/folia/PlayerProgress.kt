@@ -24,10 +24,18 @@ import kotlin.math.exp
 /** NowPlayingProgressView's 10dp round rail, 13sp times and scrub inertia; no Android slider knob. */
 @Composable
 internal fun PlayerProgress(value:Float,position:Double,duration:Double,expansion:Float,enabled:Boolean,
-    onScrub:(Float)->Unit,onCancel:()->Unit,onCommit:(Float)->Unit,modifier:Modifier) {
+    onScrub:(Float)->Unit,onCancel:()->Unit,onCommit:(Float)->Unit,modifier:Modifier,inlineTimes:Float=0f) {
     val ink=MaterialTheme.colorScheme.onSurface
     val density=LocalDensity.current
     val timePaint=remember {android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)}
+    val timeReserve=remember(duration,density) {
+        timePaint.textSize=11*density.density*density.fontScale
+        val widest=formatTime(duration).map { if(it.isDigit()) '0' else it }.joinToString("")
+        timePaint.measureText(widest)+with(density) { 10.dp.toPx() }
+    }
+    val railInset=rememberUpdatedState(timeReserve*inlineTimes)
+    fun trackWidth(width:Int)=(width-2*railInset.value).coerceAtLeast(1f)
+    fun fractionAt(x:Float,width:Int)=((x-railInset.value)/trackWidth(width)).coerceIn(0f,1f)
     val scope=rememberCoroutineScope()
     val press=remember {Animatable(1f)}
     var dragging by remember {mutableStateOf(false)}
@@ -50,14 +58,14 @@ internal fun PlayerProgress(value:Float,position:Double,duration:Double,expansio
     }.then(if(enabled) Modifier.pointerInput(Unit) {
         detectTapGestures {point->
             inertia?.cancel();interacted=true
-            commit.value((point.x/size.width).coerceIn(0f,1f))
+            commit.value(fractionAt(point.x,size.width))
             scope.launch {press.animateTo(1.04f,spring(.86f,900f));press.animateTo(.97f,spring(.86f,900f));press.animateTo(1f,spring(.86f,900f))}
         }
     }.pointerInput(Unit) {
         val tracker=VelocityTracker()
         detectHorizontalDragGestures(onDragStart={point->
             inertia?.cancel();tracker.resetTracking();interacted=true;dragging=true
-            pending=(point.x/size.width).coerceIn(0f,1f);scrub.value(pending!!)
+            pending=fractionAt(point.x,size.width);scrub.value(pending!!)
         },onDragCancel={pending=null;dragging=false;cancel.value()},onDragEnd={
             var speed=tracker.calculateVelocity().x
             if(abs(speed)<900) finish() else inertia=scope.launch {
@@ -65,7 +73,7 @@ internal fun PlayerProgress(value:Float,position:Double,duration:Double,expansio
                 while(true) {
                     val now=withFrameNanos {it};val dt=((now-previous)/1e9f).coerceIn(.001f,.032f);previous=now
                     speed*=exp(-13.4f*dt)
-                    val next=((pending?:live.value)+speed*dt/size.width).coerceIn(0f,1f)
+                    val next=((pending?:live.value)+speed*dt/trackWidth(size.width)).coerceIn(0f,1f)
                     pending=next;scrub.value(next)
                     if(next==0f||next==1f||abs(speed)<24) break
                 }
@@ -73,24 +81,30 @@ internal fun PlayerProgress(value:Float,position:Double,duration:Double,expansio
             }
         }) {change,dx->
             change.consume();tracker.addPosition(change.uptimeMillis,change.position)
-            pending=((pending?:live.value)+dx/size.width).coerceIn(0f,1f);scrub.value(pending!!)
+            pending=((pending?:live.value)+dx/trackWidth(size.width)).coerceIn(0f,1f);scrub.value(pending!!)
         }
     } else Modifier)) {
-        timePaint.textSize=13*density.density*density.fontScale
+        timePaint.textSize=playerMix(13f,11f,inlineTimes)*density.density*density.fontScale
         timePaint.color=ink.copy(alpha=((expansion-.35f)/.65f).coerceIn(0f,1f)).toArgb()
-        val thickness=playerMix(2f,10f,expansion).dp.toPx()
+        val thickness=playerMix(playerMix(2f,10f,expansion),4f,inlineTimes).dp.toPx()
         val timeBaseline=size.height-12.dp.toPx()
         val expandedTrackTop=timeBaseline+timePaint.ascent()-20.dp.toPx()
-        val top=playerMix(0f,expandedTrackTop.coerceAtLeast(10.dp.toPx()),expansion)
+        val top=playerMix(playerMix(0f,expandedTrackTop.coerceAtLeast(10.dp.toPx()),expansion),(size.height-thickness)/2,inlineTimes)
+        val left=railInset.value.coerceAtMost(size.width/2)
+        val width=size.width-2*left
         val fraction=(pending?:value).coerceIn(0f,1f)
         scale(press.value,press.value,Offset(size.width/2,top+thickness/2)) {
             val corner=CornerRadius(thickness/2)
-            drawRoundRect(ink.copy(alpha=61/255f),Offset(0f,top),Size(size.width,thickness),corner)
-            drawRoundRect(ink.copy(alpha=217/255f),Offset(0f,top),Size(size.width*fraction,thickness),corner)
+            drawRoundRect(ink.copy(alpha=61/255f),Offset(left,top),Size(width,thickness),corner)
+            drawRoundRect(ink.copy(alpha=217/255f),Offset(left,top),Size(width*fraction,thickness),corner)
         }
         if(expansion>.35f) drawContext.canvas.nativeCanvas.apply {
-            drawText(formatTime(position),0f,timeBaseline,timePaint)
-            val end=formatTime(duration);drawText(end,size.width-timePaint.measureText(end),timeBaseline,timePaint)
+            val start=formatTime(position)
+            val end=formatTime(duration)
+            val baseline=playerMix(timeBaseline,top+thickness/2-(timePaint.ascent()+timePaint.descent())/2,inlineTimes)
+            val gap=10.dp.toPx()
+            drawText(start,left-inlineTimes*(gap+timePaint.measureText(start)),baseline,timePaint)
+            drawText(end,playerMix(left+width-timePaint.measureText(end),left+width+gap,inlineTimes),baseline,timePaint)
         }
     }
 }

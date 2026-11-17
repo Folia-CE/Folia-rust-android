@@ -385,3 +385,25 @@ use super::*;
   let n=slot(&f,f[ACTION+22]as usize);assert_eq!(f[HEADER+n*STRIDE]as usize,40);assert_eq!(f[HEADER+n*STRIDE+5],1.);
   assert!((f[RHINE_POSES+n*16+12]-200.).abs()<48.01&&(f[RHINE_POSES+n*16+13]-445.).abs()<89.01);assert_eq!(f[0],0.);release(id);
  }
+
+#[test]
+fn visible_wall_card_accepts_input_during_entry() {
+ let id=create();
+ let mut frame=vec![0.;FLOATS];
+ command(id,30,2,0.,0.);
+ command(id,10,1000,0.,-1.);
+ command(id,3,1,0.,0.);
+ step(id,1./60.,800.,480.,&mut frame);
+ let mode=frame[1];
+ assert!(mode>0. && mode<0.95);
+ let slot=(0..frame[16] as usize).find(|&i|frame[HEADER+i*STRIDE+7]==0.).unwrap();
+ let o=HEADER+slot*STRIDE;
+ let ax=(frame[o+1]+frame[o+3]*0.5+frame[2])*frame[4]/frame[5];
+ let ay=(frame[o+2]+frame[o+4]*0.5+frame[3])*frame[4]/frame[6];
+ let p=1500./(1500.-frame[5]*(ax.cos()-1.)-frame[6]*(ay.cos()-1.));
+ let list_y=frame[20]+35.-frame[21];
+ let x=69.+mode*(frame[7]+frame[5]*ax.sin()*p-69.);
+ let y=list_y+mode*(frame[8]+frame[6]*ay.sin()*p-list_y);
+ assert_eq!(hit(id,x,y),0);
+ release(id);
+}

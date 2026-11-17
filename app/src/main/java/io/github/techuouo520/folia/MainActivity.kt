@@ -24,7 +24,10 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.media3.session.MediaController
@@ -152,7 +155,8 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
         }
     }
     var route by remember { mutableStateOf("home") }
-    var playerExpanded by remember {mutableStateOf(false)}
+    val dockLeft = rememberSaveable { mutableStateOf(false) }
+    var playerExpanded by remember {mutableStateOf(!fullscreenMusicBarEnabled)}
     val commandScope=rememberCoroutineScope()
     val commandLock=remember {Mutex()}
     var message by remember { mutableStateOf<String?>(null) }
@@ -188,7 +192,29 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
         }
     }
     FoliaTheme(bridge,dark,shell.playback) {
-    AppCornerWindows(bridge) {
+    val playerFrost=rememberFrostBackdrop()
+    val playerProgress=remember(route) { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    val playerFootprint = if (fullscreenMusicBarEnabled) 88.dp else MusicBarDockBottom + CORNER_BUTTON_DIAMETER.dp
+    val clearance = remember { PlayerClearance() }
+    val screenCorner=playerDisplayRadius()
+    val playerInFront by remember(playerProgress,playerExpanded) {
+        androidx.compose.runtime.derivedStateOf { playerExpanded || playerProgress.floatValue>0f }
+    }
+    val gripGate = remember { GripGate() }
+    val dockTouch = if (!fullscreenMusicBarEnabled && route == "home") {
+        val grip = remember { GripContact() }
+        ObserveGripSensors(grip)
+        Modifier.observeMusicBarSide(dockLeft, grip, gripGate)
+    } else Modifier
+    androidx.compose.runtime.CompositionLocalProvider(LocalGripGate provides gripGate, LocalPlayerClearance provides clearance) {
+    AppCornerWindows(bridge,modifier=dockTouch,playerInFront=fullscreenMusicBarEnabled && route=="home" && playerInFront,player={
+        if (route == "home") {
+            if (fullscreenMusicBarEnabled) MusicBar(bridge,shell.playback,playerFrost,playerExpanded,{playerExpanded=it},
+                toggle,action,playerProgress,screenCorner)
+            else MusicBarBubble(bridge,shell.playback,playerFrost,playerExpanded,{playerExpanded=it},toggle,action,
+                dockLeft=dockLeft.value)
+        }
+    }) {
     when (route) {
         "search" -> SearchPage(bridge = bridge, onBack = { route = "home" }, onPlay = { tracks, index ->
             if (!AudioFocus.acquire(context, bridge)) {
@@ -209,7 +235,7 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
                 }
             },
             onOpenPlayer = { playerExpanded=true },
-            playerExpanded=playerExpanded,onPlayerExpanded={playerExpanded=it},
+            playerProgress=playerProgress,playerFootprint=playerFootprint,frost=playerFrost,screenCorner=screenCorner,
             onOpenSearch = { route = "search" },
             onPlay = { tracks, index ->
                 if (!AudioFocus.acquire(context, bridge)) {
@@ -226,9 +252,14 @@ private fun FoliaScreen(bridge: FoliaBridge, resumeEpoch: Int) {
 }
 }
 
+}
+
+// The original immersive player and its transition remain available behind this switch.
+private val fullscreenMusicBarEnabled = false
+
 private fun idleShell(bridge: FoliaBridge): Shell {
     val playback = runCatching { bridge.status() }.getOrElse {
-        PlaybackSnapshot(TransportState.IDLE, 0.0, 0.0, 1f, 0L, "", "", "", "", -1, 0, false, false, RepeatMode.OFF, 0L, false, "", "", "")
+        PlaybackSnapshot(TransportState.IDLE, 0.0, 0.0, 1f, 0L, "", "", "", "", -1, 0, false, false, RepeatMode.OFF, 0L, false, "", "", "", null)
     }
     return Shell(playback, ScanSnapshot(ScanPhase.IDLE, 0, 0, 0, 0, 0, 0, "", ""), emptyList())
 }

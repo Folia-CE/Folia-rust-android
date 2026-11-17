@@ -61,6 +61,7 @@ pub fn masked_copies(
     if clip.width <= 0.0 || clip.height <= 0.0 || color.a <= 0.002 {
         return;
     }
+    let stamp = if offsets.len() > 1 { super::row_shadow::lookup(line, color, offsets) } else { None };
     let flat = [clip.y, clip.y + clip.height / 2.0, clip.y + clip.height].iter().map(|y| mask(*y)).collect::<Vec<_>>();
     let mut draw = |region: Rectangle, alpha: f32| {
         if alpha <= 0.004 {
@@ -68,6 +69,10 @@ pub fn masked_copies(
         }
         let tinted = Color { a: color.a * alpha, ..color };
         place.clip(frame, region, |inner| {
+            if let Some(stamp) = &stamp {
+                stamp.draw(inner, line.at, alpha);
+                return;
+            }
             for (dx, dy) in offsets {
                 line.fill(inner, iced_core::Vector::new(*dx, *dy), tinted);
             }
@@ -147,20 +152,7 @@ pub fn edge(d: f32) -> f32 {
 /// `0..=1` of the radius, increasing.
 pub fn radial(frame: &mut Frame, rect: Rectangle, color: Color, stops: &[(f32, f32)]) {
     let center = Point::new(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
-    let profile = |at: f32| {
-        let pair = stops.windows(2).find(|pair| at <= pair[1].1);
-        match pair {
-            Some([(a0, s0), (a1, s1)]) => a0 + (a1 - a0) * ((at - s0) / (s1 - s0).max(1.0e-4)).clamp(0.0, 1.0),
-            _ => stops.last().map_or(0.0, |(alpha, _)| *alpha),
-        }
-    };
-    let steps = 12;
-    let mut below = 0.0_f32;
-    for step in 0..steps {
-        let at = 1.0 - step as f32 / steps as f32;
-        let target = color.a * profile(at - 0.5 / steps as f32);
-        let alpha = ((target - below) / (1.0 - below)).max(0.0);
-        below = target.max(below);
+    for (at, alpha) in radial_steps(color.a, stops) {
         if alpha <= 0.0005 {
             continue;
         }
@@ -171,6 +163,25 @@ pub fn radial(frame: &mut Frame, rect: Rectangle, color: Color, stops: &[(f32, f
             frame.fill(&Path::circle(Point::ORIGIN, 1.0), Color { a: alpha, ..color });
         });
     }
+}
+
+/// Radius and source alpha of each nested circle, from outside to inside.
+pub(super) fn radial_steps(opacity: f32, stops: &[(f32, f32)]) -> [(f32, f32); 12] {
+    let profile = |at: f32| {
+        let pair = stops.windows(2).find(|pair| at <= pair[1].1);
+        match pair {
+            Some([(a0, s0), (a1, s1)]) => a0 + (a1 - a0) * ((at - s0) / (s1 - s0).max(1.0e-4)).clamp(0.0, 1.0),
+            _ => stops.last().map_or(0.0, |(alpha, _)| *alpha),
+        }
+    };
+    let mut below = 0.0_f32;
+    std::array::from_fn(|step| {
+        let at = 1.0 - step as f32 / 12.;
+        let target = opacity * profile(at - 0.5 / 12.);
+        let alpha = ((target - below) / (1.0 - below)).max(0.);
+        below = target.max(below);
+        (at, alpha)
+    })
 }
 
 /// `color-mix` in sRGB, the way the original's `mixColors` blends two colours.

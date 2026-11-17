@@ -113,7 +113,7 @@ pub fn pack_instances_tagged(frame:&[f32],bindings:&[i32],out:&mut[f32],density:
   out[dst..dst+4].copy_from_slice(&frame[src+1..src+5]);
   out[dst+4]=bindings[b]as f32;out[dst+5]=if frame[src+7]==owner{1.}else{0.};
   if out[dst+5]>0.{lifted=(((dst/16+1)as u64)<<30)|((levels[n]as u64)<<40);}
-  out[dst+6]=frame[src];out[dst+7]=bindings[b+1]as f32;
+  out[dst+6]=frame[src];out[dst+7]=bindings[b+1]as f32 + super::daily_spatial::lyrics_chip_flag(frame, frame[src+7]);
   let small=bindings[b+2];out[dst+8]=if small>=0{(small%32*64)as f32}else{0.};
   out[dst+9]=if small>=0{(small/32*64)as f32}else{0.};out[dst+10]=bindings[b+3]as f32;out[dst+11]=if frame[src+15]>0.5{frame[src+9]}else{-frame[src+9]};
   let rgb=bindings[b+4]as u32;

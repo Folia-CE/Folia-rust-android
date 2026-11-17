@@ -9,6 +9,25 @@ use iced_graphics::text::cosmic_text::{self as ct, fontdb};
 use iced_graphics::text::{font_system, to_attributes};
 use iced_widget::image::Handle;
 
+// A preparation thread uses the same faces and IDs but has independent shaping caches.
+thread_local! { static PRIVATE_FONTS: std::cell::RefCell<Option<ct::FontSystem>> = const { std::cell::RefCell::new(None) }; }
+
+pub(super) fn prepare_fonts() -> bool {
+    let Ok(mut shared) = font_system().write() else { return false };
+    let system = shared.raw();
+    let (locale, db) = (system.locale().to_owned(), system.db().clone());
+    drop(shared);
+    PRIVATE_FONTS.set(Some(ct::FontSystem::new_with_locale_and_db(locale, db)));
+    true
+}
+
+fn with_fonts<T: Default>(draw: impl FnOnce(&mut ct::FontSystem) -> T) -> T {
+    PRIVATE_FONTS.with_borrow_mut(|local| match local {
+        Some(system) => draw(system),
+        None => font_system().write().ok().map_or_else(T::default, |mut guard| draw(guard.raw())),
+    })
+}
+
 /// One shaped glyph: its byte range in the text and its pen position from the start of the line.
 #[derive(Debug, Clone, Copy)]
 pub struct Glyph {
@@ -58,34 +77,34 @@ pub fn shape(text: &str, px: f32, font: Font) -> Shaped {
     if font.style != iced_core::font::Style::Normal {
         slanted_faces();
     }
-    let Ok(mut guard) = font_system().write() else { return Shaped::default() };
-    let system = guard.raw();
-    let mut buffer = ct::Buffer::new(system, ct::Metrics::new(px.max(1.0), px.max(1.0) * 1.2));
-    buffer.set_size(system, None, None);
-    buffer.set_text(system, text, &to_attributes(font), ct::Shaping::Advanced, None);
-    buffer.shape_until_scroll(system, false);
-    let mut shaped = Shaped { px, ..Shaped::default() };
-    let starts = line_starts(text);
-    for run in buffer.layout_runs() {
-        let base = starts.get(run.line_i).copied().unwrap_or(0);
-        for glyph in run.glyphs {
-            shaped.missing += usize::from(glyph.glyph_id == 0);
-            shaped.glyphs.push(Glyph {
-                start: base + glyph.start,
-                end: base + glyph.end,
-                x: glyph.x,
-                width: glyph.w,
-                font: glyph.font_id,
-                id: glyph.glyph_id,
-                weight: glyph.font_weight,
-            });
+    with_fonts(|system| {
+        let mut buffer = ct::Buffer::new(system, ct::Metrics::new(px.max(1.0), px.max(1.0) * 1.2));
+        buffer.set_size(system, None, None);
+        buffer.set_text(system, text, &to_attributes(font), ct::Shaping::Advanced, None);
+        buffer.shape_until_scroll(system, false);
+        let mut shaped = Shaped { px, ..Shaped::default() };
+        let starts = line_starts(text);
+        for run in buffer.layout_runs() {
+            let base = starts.get(run.line_i).copied().unwrap_or(0);
+            for glyph in run.glyphs {
+                shaped.missing += usize::from(glyph.glyph_id == 0);
+                shaped.glyphs.push(Glyph {
+                    start: base + glyph.start,
+                    end: base + glyph.end,
+                    x: glyph.x,
+                    width: glyph.w,
+                    font: glyph.font_id,
+                    id: glyph.glyph_id,
+                    weight: glyph.font_weight,
+                });
+            }
+            if run.line_i == 0 {
+                shaped.baseline = run.line_y - run.line_top - run.line_height / 2.0;
+            }
+            shaped.width = shaped.width.max(run.line_w);
         }
-        if run.line_i == 0 {
-            shaped.baseline = run.line_y - run.line_top - run.line_height / 2.0;
-        }
-        shaped.width = shaped.width.max(run.line_w);
-    }
-    shaped
+        shaped
+    })
 }
 
 /// Each glyph's ink from its outline, as `(top, bottom)` below the baseline (negative is above).
@@ -127,23 +146,42 @@ pub fn ink(shaped: &Shaped) -> Vec<(f32, f32)> {
 
 /// `text` wrapped at word boundaries to `width`, breaking inside a word only when it alone is wider.
 pub fn wrap(text: &str, px: f32, font: Font, width: f32) -> Vec<Row> {
-    let Ok(mut guard) = font_system().write() else { return Vec::new() };
-    let system = guard.raw();
-    let mut buffer = ct::Buffer::new(system, ct::Metrics::new(px.max(1.0), px.max(1.0) * 1.2));
-    buffer.set_wrap(system, ct::Wrap::WordOrGlyph);
-    buffer.set_size(system, Some(width.max(1.0)), None);
-    buffer.set_text(system, text, &to_attributes(font), ct::Shaping::Advanced, None);
-    buffer.shape_until_scroll(system, false);
-    let starts = line_starts(text);
-    buffer
-        .layout_runs()
-        .map(|run| {
-            let base = starts.get(run.line_i).copied().unwrap_or(0);
-            let start = run.glyphs.iter().map(|glyph| glyph.start).min().map_or(base, |at| base + at);
-            let end = run.glyphs.iter().map(|glyph| glyph.end).max().map_or(base, |at| base + at);
-            Row { start, end, width: run.line_w }
-        })
-        .collect()
+    // Both the poster bounds and heading use this measurement every frame.
+    thread_local! {
+        static ROWS: std::cell::RefCell<std::collections::VecDeque<(String, f32, Font, f32, Vec<Row>)>> =
+            const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    }
+    ROWS.with_borrow_mut(|rows| {
+        if let Some(hit) = rows.iter().find(|r| r.0 == text && r.1 == px && r.2 == font && r.3 == width) {
+            return hit.4.clone();
+        }
+        let result = wrap_uncached(text, px, font, width);
+        if rows.len() == 32 {
+            rows.pop_front();
+        }
+        rows.push_back((text.to_owned(), px, font, width, result.clone()));
+        result
+    })
+}
+
+fn wrap_uncached(text: &str, px: f32, font: Font, width: f32) -> Vec<Row> {
+    with_fonts(|system| {
+        let mut buffer = ct::Buffer::new(system, ct::Metrics::new(px.max(1.0), px.max(1.0) * 1.2));
+        buffer.set_wrap(system, ct::Wrap::WordOrGlyph);
+        buffer.set_size(system, Some(width.max(1.0)), None);
+        buffer.set_text(system, text, &to_attributes(font), ct::Shaping::Advanced, None);
+        buffer.shape_until_scroll(system, false);
+        let starts = line_starts(text);
+        buffer
+            .layout_runs()
+            .map(|run| {
+                let base = starts.get(run.line_i).copied().unwrap_or(0);
+                let start = run.glyphs.iter().map(|glyph| glyph.start).min().map_or(base, |at| base + at);
+                let end = run.glyphs.iter().map(|glyph| glyph.end).max().map_or(base, |at| base + at);
+                Row { start, end, width: run.line_w }
+            })
+            .collect()
+    })
 }
 
 fn line_starts(text: &str) -> Vec<usize> {
@@ -165,41 +203,69 @@ pub struct Raster {
 /// `text` in italic `font` at `px` with a `line_height` line box. Glyphs from a family without an italic come
 /// from the synthetic faces and are slanted like a browser's faux italic.
 pub fn raster_italic(text: &str, px: f32, line_height: f32, font: Font, color: Color, scale: f32) -> Option<Raster> {
-    let synthetic = slanted_faces();
-    let Ok(mut guard) = font_system().write() else { return None };
-    let system = guard.raw();
     let font = Font { style: iced_core::font::Style::Italic, ..font };
-    let metrics = ct::Metrics::new(px * scale, line_height * scale);
-    let mut buffer = ct::Buffer::new(system, metrics);
-    buffer.set_size(system, None, None);
-    buffer.set_text(system, text, &to_attributes(font), ct::Shaping::Advanced, None);
-    buffer.shape_until_scroll(system, false);
-    let pad = (px * 0.4 * scale).ceil();
-    let width = buffer.layout_runs().map(|run| run.line_w).fold(0.0_f32, f32::max);
-    let (w, h) = ((width + pad * 2.0).ceil().max(1.0) as u32, (line_height * scale).ceil().max(1.0) as u32);
-    let mut alpha = vec![0u8; w as usize * h as usize];
-    let mut missing = 0;
-    let mut swash = ct::SwashCache::new();
-    for run in buffer.layout_runs() {
-        for glyph in run.glyphs {
-            missing += usize::from(glyph.glyph_id == 0);
-            let mut physical = glyph.physical((pad, run.line_y), 1.0);
-            if synthetic.contains(&glyph.font_id) {
-                physical.cache_key.flags |= ct::CacheKeyFlags::FAKE_ITALIC;
-            }
-            let Some(image) = swash.get_image_uncached(system, physical.cache_key) else { continue };
-            blit(&mut alpha, w, h, physical.x, physical.y, &image);
-        }
-    }
+    let (alpha, w, h, pad, missing) = coverage(text, px, line_height, font, scale, Some(slanted_faces()))?;
     let [r, g, b, a] = color.into_rgba8();
     let pixels: Vec<u8> =
-        alpha.iter().flat_map(|coverage| [r, g, b, (u16::from(*coverage) * u16::from(a) / 255) as u8]).collect();
+        alpha.into_iter().flat_map(|v| [r, g, b, (u16::from(v) * u16::from(a) / 255) as u8]).collect();
     Some(Raster {
         handle: Handle::from_rgba(w, h, pixels),
         width: w as f32 / scale,
         height: h as f32 / scale,
         left: pad / scale,
         missing,
+    })
+}
+
+pub(super) fn coverage(
+    text: &str,
+    px: f32,
+    line_height: f32,
+    font: Font,
+    scale: f32,
+    synthetic: Option<&HashSet<fontdb::ID>>,
+) -> Option<(Vec<u8>, u32, u32, f32, usize)> {
+    with_fonts(|system| {
+        let metrics = ct::Metrics::new(px * scale, line_height * scale);
+        let mut buffer = ct::Buffer::new(system, metrics);
+        buffer.set_size(system, None, None);
+        buffer.set_text(system, text, &to_attributes(font), ct::Shaping::Advanced, None);
+        buffer.shape_until_scroll(system, false);
+        let pad = (px * 0.4 * scale).ceil();
+        let width = buffer.layout_runs().map(|run| run.line_w).fold(0.0_f32, f32::max);
+        let (w, h) = ((width + pad * 2.0).ceil().max(1.0) as u32, (line_height * scale).ceil().max(1.0) as u32);
+        let pixels = (w as usize).checked_mul(h as usize)?;
+        if pixels > 1024 * 1024 {
+            return None;
+        }
+        let mut alpha = vec![0u8; pixels];
+        let mut missing = 0;
+        thread_local! {
+            static GLYPHS: std::cell::RefCell<(ct::SwashCache, std::collections::VecDeque<ct::CacheKey>)> =
+                std::cell::RefCell::new((ct::SwashCache::new(), std::collections::VecDeque::new()));
+        }
+        GLYPHS.with_borrow_mut(|(swash, order)| {
+            for run in buffer.layout_runs() {
+                for glyph in run.glyphs {
+                    missing += usize::from(glyph.glyph_id == 0);
+                    let mut physical = glyph.physical((pad, run.line_y), 1.0);
+                    if synthetic.is_some_and(|ids| ids.contains(&glyph.font_id)) {
+                        physical.cache_key.flags |= ct::CacheKeyFlags::FAKE_ITALIC;
+                    }
+                    if !swash.image_cache.contains_key(&physical.cache_key) {
+                        if order.len() >= 384
+                            && let Some(old) = order.pop_front()
+                        {
+                            swash.image_cache.remove(&old);
+                        }
+                        order.push_back(physical.cache_key);
+                    }
+                    let Some(image) = swash.get_image(system, physical.cache_key) else { continue };
+                    blit(&mut alpha, w, h, physical.x, physical.y, image);
+                }
+            }
+        });
+        Some((alpha, w, h, pad, missing))
     })
 }
 

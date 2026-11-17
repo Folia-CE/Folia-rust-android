@@ -39,15 +39,27 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
     private var released=false
     private val appContext = context.applicationContext
     private var cachedGeneration = Long.MIN_VALUE
+    private var cachedIndex = -1
     private var cachedItems = emptyList<MediaItemData>()
     private var artwork: ByteArray? = null
-    private var artworkTrack = Long.MIN_VALUE
+    private var artworkSource: PlaybackArtwork? = null
+    private var artworkJob: kotlinx.coroutines.Job? = null
 
-    fun setArtwork(trackId: Long, bytes: ByteArray?) {
-        artworkTrack = trackId
-        artwork = bytes
-        cachedGeneration = Long.MIN_VALUE
-        invalidateState()
+    private fun updateArtwork(snapshot: PlaybackSnapshot) {
+        val source=snapshot.artSource()
+        if(source==artworkSource) return
+        artworkJob?.cancel()
+        if(source?.owner!=artworkSource?.owner) artwork=null
+        artworkSource=source
+        cachedGeneration=Long.MIN_VALUE
+        if(source!=null) artworkJob=scope.launch {
+            val bytes=bridge.readArtwork(source,::notificationCover)
+            if(!released && source==artworkSource) {
+                artwork=bytes
+                cachedGeneration=Long.MIN_VALUE
+                invalidateState()
+            }
+        }
     }
 
     fun refresh() {
@@ -59,7 +71,7 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
                     val next=bridge.status()
                     next to if(next.queueGeneration!=status?.queueGeneration) bridge.queue() else null
                 }}
-                if(!released) {status=result.first;result.second?.let {tracks=it};invalidateState()}
+                if(!released) {status=result.first;result.second?.let {tracks=it};updateArtwork(result.first);invalidateState()}
             } catch(e: Exception) {if(e is CancellationException) throw e;Log.e(TAG,"refresh failed",e)}
             finally {refreshing=false}
         }
@@ -70,7 +82,7 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
         scope.launch {
             try {
                 val pair=withContext(Dispatchers.IO) {calls.withLock {bridge.status() to bridge.queue()}}
-                status=pair.first;tracks=pair.second;cachedGeneration=Long.MIN_VALUE
+                status=pair.first;tracks=pair.second;cachedGeneration=Long.MIN_VALUE;updateArtwork(pair.first)
                 future.set(MediaSession.MediaItemsWithStartPosition(tracks.mapIndexed {i,t->item(i,t).mediaItem},pair.first.queueIndex.coerceAtLeast(0),(pair.first.positionSeconds*1000).toLong()))
                 invalidateState()
             } catch(e: Exception) {future.setException(e)}
@@ -160,7 +172,7 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
     }
 
     private fun playlist(status: PlaybackSnapshot): List<MediaItemData> {
-        if (status.queueGeneration == cachedGeneration) {
+        if (status.queueGeneration == cachedGeneration && status.queueIndex == cachedIndex) {
             return if (status.queueLength == 0) emptyList() else cachedItems
         }
         val built = try {
@@ -169,6 +181,7 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
             Log.e(TAG, "queue read failed", error)
             return cachedItems
         }
+        cachedIndex = status.queueIndex
         cachedGeneration = status.queueGeneration
         cachedItems = built
         return built
@@ -182,7 +195,7 @@ class FoliaPlayer(context: Context, private val bridge: FoliaBridge, looper: Loo
         if (track.album.isNotBlank()) {
             metadataBuilder.setAlbumTitle(track.album)
         }
-        if (track.id == artworkTrack && artwork != null) {
+        if (index == status?.queueIndex && artwork != null && track.artOwner() == artworkSource?.owner) {
             metadataBuilder.setArtworkData(artwork, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
         }
         val metadata = metadataBuilder.build()

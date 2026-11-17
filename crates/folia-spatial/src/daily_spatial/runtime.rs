@@ -73,6 +73,29 @@ impl Runtime{
 }
 
 #[cfg(test)]mod tests{use super::*;
+ #[test]fn album_entry_crosses_85_percent_while_the_selected_instance_is_still_opening(){
+  for style in [1,2] {
+   let mut r=Runtime::new();let mut f=vec![0.;FLOATS];
+   r.command(30,style,0.,0.);r.viewport(400.,890.);
+   // One track appears on many physical cells, including when resuming the same song.
+   r.command(10,1,0.,0.);r.command(3,1,0.,0.);
+   for _ in 0..300 {r.frame(1./120.,400.,890.,&mut f);}
+   let slot=(0..f[16] as usize).find(|&i|f[HEADER+i*STRIDE+7] == 1.).unwrap();
+   let cell=f[HEADER+slot*STRIDE+7] as i32;
+   r.command(1,cell,0.,0.);r.command(29,0,0.,0.);r.command(2,0,1.,0.);
+   r.frame(0.,400.,890.,&mut f);
+   assert!(f[ACTION+PLAYING_OPEN_PROGRESS]<0.85);
+   let mut crossed=false;
+   for _ in 0..600 {
+    r.frame(1./120.,400.,890.,&mut f);
+    assert_eq!(f[ACTION+22],cell as f32);
+    let open=f[ACTION+PLAYING_OPEN_PROGRESS];
+    if !crossed && open>=0.85 {assert!(open<1.);assert_eq!(f[0],1.);crossed=true;}
+    if f[0]==0.{break}
+   }
+   assert!(crossed);assert_eq!(f[0],0.);assert_eq!(f[ACTION+PLAYING_OPEN_PROGRESS],1.);
+  }
+ }
  #[test]fn explicit_styles_override_orientation_without_resetting_catalogue_or_camera(){
   let mut r=Runtime::new();let mut f=vec![0.;FLOATS];r.viewport(400.,890.);r.command(10,1024,12.,12.);r.command(3,1,0.,0.);
   r.command(30,2,0.,0.);for _ in 0..150{r.frame(1./120.,400.,890.,&mut f);}assert_eq!(f[RHINE],0.);assert_eq!(r.landscape.playing_song,Some(12));

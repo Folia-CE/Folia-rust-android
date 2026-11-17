@@ -29,7 +29,7 @@ fun main() {
             check(open.queue.bottom<=h-48)
             val closed=MusicBarGeometry(w,h,48f,0f,fontScale)
             check(closed.card.height==68f&&closed.backgroundAlpha==0f&&closed.cover.width==46f)
-            check(closed.play.x>closed.title.x&&closed.next.x>closed.play.x)
+            check(closed.play.x>closed.title.x&&closed.compactNext.x>closed.play.x)
             // No threshold-driven geometry branch may jump at a reveal/material breakpoint.
             for (point in listOf(.05f,.14f,.28f,.35f,.5f,.9f,.94f,.999f)) {
                 val a=MusicBarGeometry(w,h,48f,point-.00001f,fontScale)
@@ -40,5 +40,35 @@ fun main() {
             }
         }
     }
-    println("PASS: MusicBar interruption continuity, rapid reversal, drag settlement and no idle frame loop at 60/90/120Hz; fullscreen endpoints, control bounds and continuous geometry across material/cover thresholds")
+    // The clock uses elapsed display time, including a missed frame. Both directions use
+    // SalamPlayer's preset, including its slow final approach.
+    val reference=MusicBarMotion()
+    reference.target(true)
+    reference.step(.325f)
+    check(abs(reference.value-playerAttack.sample(.5f))<.00001f)
+    reference.step(.325f)
+    reference.target(false)
+    reference.step(.585f)
+    check(abs(reference.value-(1-playerAttack.sample(.9f)))<.00001f)
+    check(settleMusicBar(0f,.12f,-72f) && !settleMusicBar(1f,.82f,72f))
+    val fast=MusicBarMotion()
+    fast.drag(.93f,12f)
+    fast.target(true)
+    repeat(77) {
+        val last=fast.value
+        fast.step(1f/120)
+        check(fast.value>=last && fast.value<1f)
+    }
+    for((w,h) in listOf(873f to 393f,1200f to 800f)) {
+        val wide=MusicBarGeometry(w,h,24f,1f,lyricsMode=1f)
+        check(wide.wide && wide.cover.width==wide.cover.height)
+        check(wide.title.bottom<wide.cover.y && wide.cover.bottom<wide.play.y)
+        check(wide.play.bottom<=wide.progress.y && wide.progress.bottom<h)
+        check(wide.cover.x+wide.cover.width<wide.lyricPanel.x)
+    }
+    val pressed=MusicBarGeometry(393f,873f,24f,0f,press=1f)
+    check(abs(pressed.card.height-68f*.965f)<.0001f)
+    val end=MusicBarGeometry(393f,873f,24f,1f,displayRadius=40f)
+    check(end.cardRadius==18f)
+    println("PASS: MusicBar source timing, press, reversal, fast release, edge contact and portrait/landscape placement")
 }
