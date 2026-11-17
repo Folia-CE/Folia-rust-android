@@ -220,7 +220,7 @@ fn pack_inner(frame:&[f32],bindings:&[i32],out:&mut[f32],foreground:bool,previou
   let o=dst*INSTANCE;let b=n*5;let f=HEADER+n*STRIDE;let mut next=[0.;INSTANCE];
   next[..16].copy_from_slice(&frame[RHINE_POSES+n*16..RHINE_POSES+(n+1)*16]);let small=bindings[b+2];
   next[16]=bindings[b]as f32;next[17]=bindings[b+1]as f32;next[18]=if small>=0{(small%32*64)as f32}else{0.};next[19]=if small>=0{(small/32*64)as f32}else{0.};
-  next[20]=bindings[b+3]as f32 + lyrics_chip_flag(frame, frame[f+7]);next[21]=frame[f+9];let size=(next[0]*next[0]+next[1]*next[1]+next[2]*next[2]).sqrt();
+  next[20]=bindings[b+3]as f32;next[21]=frame[f+9];let size=(next[0]*next[0]+next[1]*next[1]+next[2]*next[2]).sqrt();
   next[22]=crate::render_policy::card_highlight(size);next[23]=if foreground{1.}else if opaque_depth{2.}else{0.};
   let rgb=bindings[b+4]as u32;next[24]=((rgb>>16)&255)as f32/255.;next[25]=((rgb>>8)&255)as f32/255.;next[26]=(rgb&255)as f32/255.;next[27]=if bindings[b+1]>0||bindings[b+3]>0{frame[f+5].clamp(0.,1.)}else{0.};
   if lighting{field.resolve(n);for k in 0..LIGHTS{next[28+k*12..40+k*12].copy_from_slice(&field.packed[n][k]);}}

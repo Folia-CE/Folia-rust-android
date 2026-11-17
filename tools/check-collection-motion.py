@@ -1,6 +1,5 @@
 """Run the pure motion regression against cached Kotlin tools; no Android runtime or stubs."""
 from pathlib import Path
-from motion_native import build_motion_library
 import os
 import shutil
 import subprocess
@@ -30,12 +29,10 @@ for group, artifact in [
     jars += [str(p) for p in version.rglob('*.jar') if not any(k in p.name for k in ('sources', 'javadoc'))]
 classpath = os.pathsep.join(jars)
 with tempfile.TemporaryDirectory(prefix='folia-collection-motion-') as output:
-    build_motion_library(output)
     subprocess.run([java, '-cp', classpath, 'org.jetbrains.kotlin.cli.jvm.K2JVMCompiler',
                     '-no-stdlib', '-no-reflect', '-jvm-target', '17', '-classpath', classpath, '-d', output,
-                    'app/src/main/java/io/github/techuouo520/folia/MotionKernel.kt',
                     'app/src/main/java/io/github/techuouo520/folia/spatial/CollectionMotion.kt',
                     'app/src/main/java/io/github/techuouo520/folia/spatial/CollectionMorph.kt',
                     'tools/spatial-tests/CollectionMotionTest.kt'], check=True)
-    subprocess.run([java, '-Djava.library.path=' + output, '-cp', output + os.pathsep + classpath,
+    subprocess.run([java, '-cp', output + os.pathsep + classpath,
                     'io.github.techuouo520.folia.spatial.CollectionMotionTestKt'], check=True)

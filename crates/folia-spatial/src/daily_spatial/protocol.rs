@@ -7,8 +7,6 @@ pub const VISIBLE: usize = 384;
 pub const SLOTS:usize=2048;
 pub const PREFETCH: usize = 192;
 pub const ACTION:usize=HEADER+STRIDE*SLOTS+PREFETCH;
-// Relative to ACTION. Actual opening displacement of the published playing instance.
-pub const PLAYING_OPEN_PROGRESS:usize=191;
 pub const RHINE:usize=ACTION+192;
 // Hologram face planes in the reserved Rhine header. Each retained slot is
 // cell, song, origin x/y, local width/height, alpha, xx, interactive, xy, yx, yy.
@@ -18,11 +16,3 @@ pub const HOLOGRAM_SLOTS:usize=3;
 pub const RHINE_POSES:usize=RHINE+64;
 pub const FLOATS: usize = RHINE_POSES+SLOTS*16;
 pub const VERSION:u32=6;
-
-/// Reserve bit 1 of the packed artwork-ready field for the expanded playing sleeve.
-pub(crate) fn lyrics_chip_flag(frame: &[f32], cell: f32) -> f32 {
-    if frame.get(ACTION + PLAYING_OPEN_PROGRESS).is_some_and(|&open| open >= 0.98)
-        && frame[ACTION + 22] == cell && cell >= 0. && frame[ACTION + 3] == 0. {
-        2.
-    } else { 0. }
-}

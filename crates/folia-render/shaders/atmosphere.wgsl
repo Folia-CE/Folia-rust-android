@@ -45,14 +45,9 @@ fn subtitle_alpha(uv: vec2<f32>) -> f32 {
 @fragment
 fn fs_overlay(input: VsOut) -> @location(0) vec4<f32> {
     let uv = input.uv;
-    let n = grain_of(uv);
-    if u.vignette == 0. && u.glow_alpha <= 0. && u.grain <= 1. {
-        // Same straight-alpha result as the general composite, including very faint grain.
-        let white = min(n * 1000., 1.);
-        return vec4(vec3(white * white), n);
-    }
     let edge = length((uv - vec2<f32>(0.5, 0.45)) * vec2<f32>(1.15, 1.0));
     let shade = smoothstep(0.28, 0.98, edge) * u.vignette;
+    let n = grain_of(uv);
     let shade_a = clamp(shade + n, 0.0, 0.92);
     let shade_rgb = mix(vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0), n / max(shade_a, 0.001));
     let glow_a = subtitle_alpha(uv);

@@ -20,11 +20,7 @@ use crate::{Place, Scene, color};
 /// The canvas state of one Monet picture: measurements, the wheel, and the hanger drag preview.
 #[derive(Default)]
 pub struct Cache {
-    pub(super) gpu: Option<std::cell::RefCell<super::rail_gpu::Rows>>,
     rail: Rail,
-    pub(super) ticker_bounds: Option<[f32; 6]>,
-    heading_key: Option<u64>,
-    album: Option<(String, f32, String)>,
     artist: Option<(ArtistKey, Option<Raster>)>,
     pin: Pin,
     hangers: Vec<(([u32; 6], folia_core::Rgb), Handle)>,
@@ -32,18 +28,8 @@ pub struct Cache {
     now: Option<Instant>,
 }
 
-impl Cache {
-    pub(super) fn needs_frame(&self, now: Instant) -> bool {
-        self.pin.editing.is_some() || self.rail.needs_frame(now) || self.gpu.as_ref().is_some_and(|r| r.borrow().pending())
-    }
-
-    pub(crate) fn gpu_enabled(&self) -> bool {
-        self.gpu.is_some()
-    }
-}
-
 /// What the artist raster was made for: label, size, colour, pixel density and the width it was cut to.
-type ArtistKey = (String, u32, [u8; 4], u32, u32, iced_core::Font);
+type ArtistKey = (String, u32, [u8; 4], u32, u32);
 
 /// The hanger: a click enters edit mode, a drag moves the portrait, a click again leaves.
 #[derive(Debug, Default)]
@@ -77,66 +63,16 @@ impl Pin {
 }
 
 pub fn draw(scene: &Scene<'_>, cache: &mut Cache, frame: &mut Frame, size: Size, place: Place) {
-    let offset = cache.pin.offset(tuning::offset(&scene.tuning));
-    let layout = layout::layout(scene, size, offset);
-    heading(frame, scene, cache, &layout, place);
-    foreground(scene, cache, frame, &layout, place);
-}
-
-/// The mobile player has a dedicated full-size surface. Keep the title, its shadow and
-/// the background in a retained display list while the rail and spectrum continue moving.
-pub(crate) fn player_geometry(
-    scene: &Scene<'_>,
-    cache: &mut Cache,
-    renderer: &iced_renderer::Renderer,
-    size: Size,
-    place: Place,
-    held: &canvas::Cache,
-) -> Vec<canvas::Geometry> {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    let offset = cache.pin.offset(tuning::offset(&scene.tuning));
-    let layout = layout::layout(scene, size, offset);
-    let mut key = DefaultHasher::new();
-    (&scene.title, &scene.artist, &scene.album, scene.monet.typography.fingerprint(), scene.backdrop).hash(&mut key);
-    for ink in [scene.theme.primary, scene.theme.secondary, scene.theme.background] {
-        [ink.r, ink.g, ink.b].hash(&mut key);
-    }
-    [layout.header_width, layout.artist.y, layout.title_px, layout.artist_px].map(f32::to_bits).hash(&mut key);
-    // All four heading intro tracks have reached their endpoints at 2 seconds.
-    scene.time.clamp(0., 2.).to_bits().hash(&mut key);
-    let key = key.finish();
-    if cache.heading_key != Some(key) {
-        held.clear();
-        cache.heading_key = Some(key);
-    }
-    let header = held.draw(renderer, size, |frame| {
-        if scene.backdrop {
-            frame.fill_rectangle(Point::ORIGIN, size, color(scene.theme.background, 1.));
-        }
-        heading(frame, scene, cache, &layout, place);
-    });
-    let mut live = Frame::new(renderer, size);
-    foreground(scene, cache, &mut live, &layout, place);
-    vec![header, live.into_geometry()]
-}
-
-fn foreground(scene: &Scene<'_>, cache: &mut Cache, frame: &mut Frame, layout: &Layout, place: Place) {
     let manifest = tuning::manifest();
     let values = &scene.tuning;
+    let saved = tuning::offset(values);
+    let offset = cache.pin.offset(saved);
+    let layout = layout::layout(scene, size, offset);
     let time = scene.time;
-    if scene.monet.native_ticker {
-        cache.ticker_bounds = Some([
-            layout.rail.x + layout.glow, layout.rail.y,
-            layout.rail.width - 2. * layout.glow, layout.rail.height,
-            layout.lyric_px, layout.translation_px,
-        ]);
-    } else {
-        let rail_p = intro(time, 0.65, 1.2);
-        rail::draw(frame, place, scene, layout, &mut cache.rail, cache.gpu.as_ref(), rail_p, 20.0 * (1.0 - rail_p));
-    }
-    if !scene.monet.shell_capsule
-        && let Some(capsule) = layout.capsule
-    {
+    heading(frame, scene, cache, &layout, place);
+    let rail_p = intro(time, 0.65, 1.2);
+    rail::draw(frame, place, scene, &layout, &mut cache.rail, rail_p, 20.0 * (1.0 - rail_p));
+    if let Some(capsule) = layout.capsule {
         description(frame, scene, &layout, capsule, intro(time, 0.95, 1.0));
     }
     let square = values.choice(manifest, "portraitStyle") == "square";
@@ -145,7 +81,7 @@ fn foreground(scene: &Scene<'_>, cache: &mut Cache, frame: &mut Frame, layout: &
     if values.flag(manifest, "showAudioVisualization") {
         let progress = intro(time, 0.8, 1.2);
         let rect = Rectangle { y: layout.audio.y + 15.0 * (1.0 - progress), ..layout.audio };
-        draw_audio(frame, rect, scene, values.choice(manifest, "audioStyle") == "line", progress, cache.gpu.as_ref());
+        draw_audio(frame, rect, scene, values.choice(manifest, "audioStyle") == "line", progress);
     }
 }
 
@@ -164,16 +100,15 @@ fn heading(frame: &mut Frame, scene: &Scene<'_>, cache: &mut Cache, layout: &Lay
             ink.into_rgba8(),
             density.to_bits(),
             layout.header_width.to_bits(),
-            scene.monet.typography.font(ITALIC),
         );
         let fresh = cache.artist.as_ref().is_none_or(|(held, _)| *held != key);
         if fresh {
-            let shown = truncate(label, layout.artist_px, scene.monet.typography.font(ITALIC), layout.header_width);
+            let shown = truncate(label, layout.artist_px, ITALIC, layout.header_width);
             let raster = text::raster_italic(
                 &shown,
                 layout.artist_px,
                 layout.artist.height,
-                scene.monet.typography.font(iced_core::Font::DEFAULT),
+                iced_core::Font::DEFAULT,
                 ink,
                 density,
             );
@@ -212,7 +147,7 @@ fn heading(frame: &mut Frame, scene: &Scene<'_>, cache: &mut Cache, layout: &Lay
     }
     let dx = -40.0 * (1.0 - title_p);
     let title = if scene.title.trim().is_empty() { "Monet" } else { scene.title.trim() };
-    let rows = title_rows(title, layout.title_px, layout.header_width, scene.monet.typography.font(SEMIBOLD));
+    let rows = title_rows(title, layout.title_px, layout.header_width);
     let line_height = layout.title_px * 1.06;
     let shadow = ink::blur_offsets(18.0, (0.0, 14.0));
     let shade = color(theme.background, ink::split_alpha(0.28 * title_p, shadow.len()));
@@ -222,7 +157,7 @@ fn heading(frame: &mut Frame, scene: &Scene<'_>, cache: &mut Cache, layout: &Lay
             at: Point::new(layout.title.x + dx, layout.title.y + index as f32 * line_height),
             px: layout.title_px,
             line_height,
-            font: scene.monet.typography.font(SEMIBOLD),
+            font: SEMIBOLD,
         };
         let band = Rectangle {
             x: 0.0,
@@ -233,18 +168,11 @@ fn heading(frame: &mut Frame, scene: &Scene<'_>, cache: &mut Cache, layout: &Lay
         ink::masked_copies(frame, place, pen, shade, band, &ink::opaque, &shadow);
         ink::masked(frame, place, pen, color(theme.primary, title_p), band, &ink::opaque);
     }
-    let original = scene.album.trim();
-    let album = match &cache.album {
-        Some((name, width, shown)) if name == original && *width == layout.header_width => shown,
-        _ => {
-            let label = if original.is_empty() { "Monet".to_owned() } else { original.to_uppercase() };
-            let shown = truncate(&label, 14.0, iced_core::Font::DEFAULT, layout.header_width);
-            &cache.album.insert((original.to_owned(), layout.header_width, shown)).2
-        }
-    };
+    let album = if scene.album.trim().is_empty() { "Monet".to_owned() } else { scene.album.trim().to_uppercase() };
+    let album = truncate(&album, 14.0, iced_core::Font::DEFAULT, layout.header_width);
     put_text(
         frame,
-        album,
+        &album,
         Point::new(layout.album.x + dx, layout.album.y),
         14.0,
         20.0,
@@ -254,8 +182,8 @@ fn heading(frame: &mut Frame, scene: &Scene<'_>, cache: &mut Cache, layout: &Lay
 }
 
 /// At most two rows of the title, the second cut with an ellipsis (`line-clamp-2`, `overflow-wrap: anywhere`).
-fn title_rows(title: &str, px: f32, width: f32, font: iced_core::Font) -> Vec<String> {
-    let rows = text::wrap(title, px, font, width);
+fn title_rows(title: &str, px: f32, width: f32) -> Vec<String> {
+    let rows = text::wrap(title, px, SEMIBOLD, width);
     let piece = |row: &text::Row| title.get(row.start..row.end).unwrap_or_default().trim_end().to_owned();
     match rows.as_slice() {
         [] => vec![title.to_owned()],
@@ -264,7 +192,7 @@ fn title_rows(title: &str, px: f32, width: f32, font: iced_core::Font) -> Vec<St
         [first, second, ..] => {
             vec![
                 piece(first),
-                truncate(&format!("{}\u{2026}", title.get(second.start..).unwrap_or_default()), px, font, width),
+                truncate(&format!("{}\u{2026}", title.get(second.start..).unwrap_or_default()), px, SEMIBOLD, width),
             ]
         }
     }
@@ -621,13 +549,6 @@ pub fn update<Message: From<super::Event>>(
     size: Size,
     at: Option<Point>,
 ) -> Option<canvas::Action<Message>> {
-    if let canvas::Event::Window(iced_core::window::Event::RedrawRequested(now)) = event {
-        cache.now = Some(*now);
-        if cache.pin.editing.is_some() || rail::settling(&cache.rail, *now) {
-            return Some(canvas::Action::request_redraw());
-        }
-        return rail::release_due(&cache.rail).map(canvas::Action::request_redraw_at);
-    }
     let manifest = tuning::manifest();
     let saved = tuning::offset(&scene.tuning);
     let offset = cache.pin.offset(saved);
@@ -637,10 +558,17 @@ pub fn update<Message: From<super::Event>>(
         cache.pin = Pin::default();
     }
     // The original disables seeking in the preview (`seekDisabled={isPreviewMode}`).
-    let can_seek = !scene.preview && !scene.monet.native_ticker;
+    let can_seek = !scene.preview;
     match event {
+        canvas::Event::Window(iced_core::window::Event::RedrawRequested(now)) => {
+            cache.now = Some(*now);
+            if cache.pin.editing.is_some() || rail::settling(&cache.rail, *now) {
+                return Some(canvas::Action::request_redraw());
+            }
+            rail::release_due(&cache.rail).map(canvas::Action::request_redraw_at)
+        }
         canvas::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-            if scene.monet.native_ticker || !at.is_some_and(|at| rail::over(&layout, at)) {
+            if !at.is_some_and(|at| rail::over(&layout, at)) {
                 return None;
             }
             let (lines, pixels) = match delta {
@@ -652,9 +580,7 @@ pub fn update<Message: From<super::Event>>(
         }
         canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
             let at = at?;
-            if can_seek
-                && let Some(start) = rail::hit(&cache.rail, at).and_then(|i| scene.lyrics.lines.get(i)).map(|l| l.start)
-            {
+            if can_seek && let Some(start) = super::line_at(scene, size, at) {
                 rail::end_manual(&mut cache.rail);
                 return Some(canvas::Action::publish(Message::from(super::Event::Seek(start))).and_capture());
             }
@@ -741,18 +667,11 @@ fn playback_spectrum<'a>(scene: &Scene<'a>) -> (f64, [f64; 5], &'a [u8]) {
     (f64::from(audio.power), bands, raw)
 }
 
-fn draw_audio(
-    frame: &mut Frame,
-    rect: Rectangle,
-    scene: &Scene<'_>,
-    line: bool,
-    progress: f32,
-    gpu: Option<&std::cell::RefCell<super::rail_gpu::Rows>>,
-) {
+fn draw_audio(frame: &mut Frame, rect: Rectangle, scene: &Scene<'_>, line: bool, progress: f32) {
     if scene.preview {
         draw_static_audio(frame, rect, scene, line, progress);
     } else {
-        draw_live_audio(frame, rect, scene, line, progress, gpu);
+        draw_live_audio(frame, rect, scene, line, progress);
     }
 }
 
@@ -781,14 +700,7 @@ fn draw_static_audio(frame: &mut Frame, rect: Rectangle, scene: &Scene<'_>, line
 }
 
 /// The playing spectrum. `t` is the playback position in milliseconds, so a pause holds the frame.
-fn draw_live_audio(
-    frame: &mut Frame,
-    rect: Rectangle,
-    scene: &Scene<'_>,
-    line: bool,
-    progress: f32,
-    gpu: Option<&std::cell::RefCell<super::rail_gpu::Rows>>,
-) {
+fn draw_live_audio(frame: &mut Frame, rect: Rectangle, scene: &Scene<'_>, line: bool, progress: f32) {
     let (power, bands, raw) = playback_spectrum(scene);
     let millis = scene.time * 1000.0;
     let level = super::spectrum::energy(power);
@@ -816,7 +728,6 @@ fn draw_live_audio(
         frame.stroke(&curve(&points), stroke_gradient(across, 2.0));
         return;
     }
-    let mut gpu = gpu.map(|rows| rows.borrow_mut());
     let gap = rect.width / 72.0;
     for index in 0..72 {
         let band = band_at(bands, raw, index as f64 / 71.0);
@@ -828,12 +739,11 @@ fn draw_live_audio(
             super::spectrum::envelope(index),
         ) as f32;
         let x = rect.x + index as f32 * gap + gap * 0.14;
-        let bar = Rectangle { x, y: y0 + rect.height - bar, width: (gap * 0.34).max(1.35), height: bar };
-        if let Some(rows) = &mut gpu {
-            rows.spectrum_bar(bar, rect, color(scene.theme.primary, progress));
-        } else {
-            frame.fill_rectangle(bar.position(), bar.size(), Fill::from(across));
-        }
+        frame.fill_rectangle(
+            Point::new(x, y0 + rect.height - bar),
+            Size::new((gap * 0.34).max(1.35), bar),
+            Fill::from(across),
+        );
     }
 }
 

@@ -78,7 +78,6 @@ impl State{
  }
  pub(super) fn write_actions(&self,out:&mut[f32]){
   let u=&mut out[ACTION..ACTION+192];u.fill(0.);u[3]=self.action_phase as f32;u[23]=-1.;u[4]=-1.;u[5]=-1.;u[22]=self.playing.map(|v|v as f32).unwrap_or(-1.);
-  u[PLAYING_OPEN_PROGRESS]=self.playing.and_then(|cell|self.weights.get(&cell)).copied().unwrap_or(0.);
   u[0]=self.menu.value.clamp(0.,1.);u[1]=self.lift.value.clamp(0.,1.);u[2]=self.confirmation.value.clamp(0.,1.);
   u[20]=28.;u[24]=self.lift.value.max(0.);u[25]=0.94+0.06*u[2];u[26]=if self.capture_hold{1.}else{0.};u[124]=self.world_revision as f32;u[125]=VERSION as f32;
   u[126]=self.lift_shadow.value.clamp(0.,1.)*u[1];

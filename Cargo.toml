@@ -75,17 +75,3 @@ keyring = { path = "crates/keyring" }
 
 [profile.dev.package.folia-player]
 opt-level = 3
-
-
-# The live Monet frame performs shaping and tessellation on its own render thread.
-[profile.dev.package.folia-visualizer]
-opt-level = 3
-[profile.dev.package.cosmic-text]
-opt-level = 3
-[profile.dev.package.lyon_tessellation]
-opt-level = 3
-# Glyph rasterization and FFT execute during live lyric playback in debug builds as well.
-[profile.dev.package.swash]
-opt-level = 3
-[profile.dev.package.rustfft]
-opt-level = 3

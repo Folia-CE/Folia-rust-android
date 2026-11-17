@@ -30,15 +30,6 @@ tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-t
 uniffi.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
-lyricchain_native = { path = "../salam-lyricchain" }
-folia-visualizer.workspace = true
-folia-render.workspace = true
-iced_core.workspace = true
-iced_widget.workspace = true
-iced_wgpu.workspace = true
-wgpu.workspace = true
-ndk = "0.9"
-raw-window-handle = "0.6"
 jni.workspace = true
 ndk-context.workspace = true
 rustls-platform-verifier = "=0.7.1"

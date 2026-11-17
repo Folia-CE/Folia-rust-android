@@ -17,14 +17,6 @@ flat in vec4 v_material;
 in vec3 v_normal;
 in float v_shade;
 out vec4 color;
-uniform float u_zoom;
-flat in float v_lyrics;
-vec3 coverSample(vec2 uv){
- if(v_info.w>.5)return textureLod(u_covers,vec3(uv,v_info.x),0.).rgb;
- if(v_preview.z>.5)return textureLod(u_previews,(v_preview.xy+vec2(.5)+uv*63.)/vec2(textureSize(u_previews,0)),0.).rgb;
- return vec3(mix(.89,.12,u_dark));
-}
-// COVER_LYRICS_CHIP
 void main(){
  if(abs(v_preview.w)<.001)discard;
  if(v_info.y<.5&&u_mode>.01&&(abs(v_angles.x)>1.22||abs(v_angles.y)>1.22))discard;
@@ -39,8 +31,9 @@ void main(){
  vec3 rgb=mix(vec3(mix(.96,.028,u_dark)),v_material.rgb,mix(.20,.32,u_dark));
  if(artwork){
   vec2 uv=local/side;
-  rgb=coverSample(uv);
-  if(v_lyrics>.5)rgb=printLyricsChip(uv,rgb,side*mix(1.,u_zoom,u_mode));
+  if(v_info.w>.5)rgb=texture(u_covers,vec3(uv,v_info.x)).rgb;
+  else if(v_preview.z>.5)rgb=texture(u_previews,(v_preview.xy+vec2(.5)+uv*63.0)/vec2(textureSize(u_previews,0))).rgb;
+  else rgb=vec3(mix(.89,.12,u_dark));
  }
  // Reuse vertex curvature lighting instead of recomputing trigonometry per fragment.
  rgb*=mix(1.0,v_shade,u_mode);

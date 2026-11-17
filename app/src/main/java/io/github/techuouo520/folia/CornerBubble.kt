@@ -2,7 +2,6 @@ package io.github.techuouo520.folia
 
 import androidx.compose.material3.MaterialTheme
 import android.os.Build
-import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -45,22 +44,14 @@ import kotlin.math.*
 @Composable
 internal fun CornerBubble(
     modifier: Modifier, motion: CornerMotion, frame: State<Int>, active: Boolean, right: Boolean,
-    frost: FrostBackdrop?, dark: Boolean, avatar: ImageBitmap?, label: String, title: String?,
-    artworkPlaceholder: (@Composable () -> Unit)? = null,
-    dockWidth: Dp = CORNER_BUTTON_DIAMETER.dp, dockHeight: Dp = CORNER_BUTTON_DIAMETER.dp,
-    attachedToPlayer: Boolean = false, dockMotion: CornerMotion? = null, backTurn: FloatArray? = null, backEnabled: Boolean = false,
+    frost: FrostBackdrop, dark: Boolean, avatar: ImageBitmap?, label: String, title: String,
+    dockMotion: CornerMotion? = null, backEnabled: Boolean = false,
     onBackPressed: (Boolean)->Unit = {}, onBack: ()->Unit = {},
     onPressed: (Boolean)->Unit, onGeometryChanged: ()->Unit, onClick: ()->Unit, content: @Composable ()->Unit,
 ) {
     val scroll=rememberScrollState()
     // Shape/blur are driven directly by the same state as the outline, not a second animator.
-    val px = androidx.compose.ui.platform.LocalDensity.current.density
-    val avoid = if (motion.flight != null || attachedToPlayer) Modifier else Modifier.avoidPlayer { box ->
-        frame.value
-        val shape = motion.rect()
-        Rect(box.left+shape.left*px,box.top+shape.top*px,box.left+shape.right*px,box.top+shape.bottom*px)
-    }
-    SubcomposeLayout(modifier.then(avoid).widthIn(max=420.dp).fillMaxWidth().layout {measurable,constraints->
+    SubcomposeLayout(modifier.widthIn(max=420.dp).fillMaxWidth().layout {measurable,constraints->
         // Keep the source's travelling blur and edge overshoot outside the final panel bounds.
         val pad=64.dp.roundToPx()
         val child=measurable.measure(constraints.offset(horizontal=pad*2,vertical=pad*2))
@@ -78,64 +69,53 @@ internal fun CornerBubble(
         val width=constraints.maxWidth-pad*2
         val viewport=constraints.maxHeight-pad*2
         val body=if(active) subcompose("body") {
-            if (title == null) content() else PinnedBubbleContents(title,dark,motion,frame,scroll,content)
+            PinnedBubbleContents(title,dark,motion,frame,scroll,content)
         }.single().measure(Constraints(minWidth=width,maxWidth=width,maxHeight=viewport)) else null
         if(motion.bounds(width/density,body?.height?.div(density),right)) onGeometryChanged()
         val r=motion.rect();val radius=motion.radius()
-        // At rest an opaque sleeve covers every pixel of the MusicBar dock.
-        val covered = !active && avatar?.hasAlpha == false && motion.pressScaleX == 1f && motion.pressScaleY == 1f &&
-            r.width == dockWidth.value && r.height == dockHeight.value
-        val reach = ((dockMotion?.rect()?.height ?: CORNER_BUTTON_DIAMETER) - CORNER_BUTTON_DIAMETER).coerceAtLeast(0f)
-        val dx = (backTurn?.get(2) ?: 0f)*reach*motion.pressScaleX
-        val dy = (backTurn?.get(3) ?: 1f)*reach*motion.pressScaleY
-        val carry = 1f-motion.progress
-        val dockShape = if (dx*carry > .02f && dy*carry > .02f)
-            TurningDock(radius.dp, dx*carry*density, dy*carry*density, backTurn!![4])
-            else RoundedCornerShape(radius.dp)
         val glass=subcompose("glass") {
-            Box(Modifier.clip(dockShape).then(if (covered) Modifier else if (frost != null) Modifier.frostedBackdrop(frost,dark)
-                else Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh))
+            Box(Modifier.clip(RoundedCornerShape(radius.dp)).frostedBackdrop(frost,dark)
                 .then(if(active) Modifier.pointerInput(Unit){detectTapGestures{}} else Modifier))
         }.single().measure(Constraints.fixed(max(1,(r.width*density).roundToInt()),max(1,(r.height*density).roundToInt())))
         val fade=motion.iconAlpha()
         val icon=subcompose("icon") {
             val ink=MaterialTheme.colorScheme.onSurface
             val glyphFraction=21f/CORNER_BUTTON_DIAMETER // 19dp → 21dp; retain press scaling.
-            Box(Modifier.fillMaxSize().cornerAction(label,fade>.01f,onPressed,onClick, movingOrigin = motion.flight != null),contentAlignment=androidx.compose.ui.Alignment.Center) {
+            Box(Modifier.fillMaxSize().cornerAction(label,fade>.01f,onPressed,onClick),contentAlignment=androidx.compose.ui.Alignment.Center) {
                 if(avatar!=null) Image(avatar,null,Modifier.fillMaxSize().clip(CircleShape),contentScale=ContentScale.Crop)
-                else if(artworkPlaceholder != null) artworkPlaceholder()
                 else if(right) Image(painterResource(R.drawable.salam_settings),null,Modifier.fillMaxSize(glyphFraction),colorFilter=ColorFilter.tint(ink))
                 else Canvas(Modifier.fillMaxSize(glyphFraction)) {
                     scale(size.width/24,size.height/24,Offset.Zero) {drawSceneGlyph(SceneGlyph.User,ink)}
                 }
             }
-        }.single().measure(Constraints.fixed((dockWidth.toPx()*motion.pressScaleX).roundToInt(),(dockHeight.toPx()*motion.pressScaleY).roundToInt()))
-        val backSize = reach.coerceAtMost(CORNER_BUTTON_DIAMETER)
-        val back=if(dockMotion!=null && backSize>.01f) subcompose("back") {
+        }.single().measure(Constraints.fixed((CORNER_BUTTON_DIAMETER*motion.press.scaleX*density).roundToInt(),(CORNER_BUTTON_DIAMETER*motion.press.scaleY*density).roundToInt()))
+        // The lower hit region never overlaps the avatar's 50dp slot. It grows inside the
+        // same surface and remains clipped while appearing/retracting.
+        val backTop=r.top+CORNER_BUTTON_DIAMETER*motion.press.scaleY
+        val backHeight=if(dockMotion==null) 0f else
+            ((dockMotion.rect().height-CORNER_BUTTON_DIAMETER)*motion.press.scaleY).coerceAtLeast(0f)
+        val back=if(dockMotion!=null && backHeight>.01f) subcompose("back") {
             val label=stringResource(R.string.collection_back)
             val ink=MaterialTheme.colorScheme.onSurface
-            Box(Modifier.fillMaxSize().clip(CircleShape)
-                .cornerAction(label,backEnabled,onBackPressed,onBack),
+            Box(Modifier.fillMaxSize().clipToBounds()
+                .cornerAction(label,backEnabled&&backHeight>=32f,onBackPressed,onBack),
                 contentAlignment=androidx.compose.ui.Alignment.Center) {
                 Canvas(Modifier.requiredSize(21.dp).graphicsLayer {
-                    scaleX=motion.pressScaleX;scaleY=motion.pressScaleY
+                    scaleX=motion.press.scaleX;scaleY=motion.press.scaleY
                 }) {scale(size.width/24,size.height/24,Offset.Zero) {drawSceneGlyph(SceneGlyph.Back,ink)}}
             }
         }.single().measure(Constraints.fixed(
-            max(1,(backSize*motion.pressScaleX*density).roundToInt()),
-            max(1,(backSize*motion.pressScaleY*density).roundToInt()))) else null
-        val surfaceHeight = if (motion.bottomOrigin) motion.layoutHeight.dp.roundToPx()
-            else max(ceil(r.bottom*density).toInt(),body?.height?:CORNER_BUTTON_DIAMETER.dp.roundToPx())
-        layout(width+pad*2,surfaceHeight+pad*2) {
+            max(1,(CORNER_BUTTON_DIAMETER*motion.press.scaleX*density).roundToInt()),
+            max(1,(backHeight*density).roundToInt()))) else null
+        layout(width+pad*2,max(ceil(r.bottom*density).toInt(),body?.height?:CORNER_BUTTON_DIAMETER.dp.roundToPx())+pad*2) {
             glass.place(pad+(r.left*density).roundToInt(),pad+(r.top*density).roundToInt())
             body?.placeWithLayer(pad,pad) {
                 frame.value
                 shape=CornerClip(motion.rect(),motion.radius());clip=true
             }
-            val anchorX=motion.anchorX(r,dockWidth.value*.5f*motion.pressScaleX)
-            val iconRadiusY=dockHeight.value*.5f*motion.pressScaleY
-            val anchorY=if(motion.bottomOrigin) r.bottom-iconRadiusY else r.top+iconRadiusY
-            back?.placeWithLayer(pad+((anchorX+dx)*density-back.width*.5f).roundToInt(),pad+((anchorY+dy)*density-back.height*.5f).roundToInt()) {
+            val anchorX=if(right) r.right-CORNER_BUTTON_RADIUS*motion.press.scaleX else r.left+CORNER_BUTTON_RADIUS*motion.press.scaleX
+            val anchorY=r.top+CORNER_BUTTON_RADIUS*motion.press.scaleY
+            back?.placeWithLayer(pad+(anchorX*density-back.width*.5f).roundToInt(),pad+(backTop*density).roundToInt()) {
                 alpha=fade*cornerSmooth(dockMotion?.progress?:0f)
                 scaleX=motion.iconScale();scaleY=motion.iconScale()
             }
@@ -148,8 +128,7 @@ internal fun CornerBubble(
 
 /** Independent action owners share the original escape-slop, cancellation and press response. */
 @Composable
-private fun Modifier.cornerAction(label: String,enabled: Boolean,onPressed: (Boolean)->Unit,onClick: ()->Unit, movingOrigin: Boolean = false): Modifier {
-    val gate = LocalGripGate.current
+private fun Modifier.cornerAction(label: String,enabled: Boolean,onPressed: (Boolean)->Unit,onClick: ()->Unit): Modifier {
     val latestClick=rememberUpdatedState(onClick)
     val latestPress=rememberUpdatedState(onPressed)
     val haptics=LocalHapticFeedback.current
@@ -160,18 +139,14 @@ private fun Modifier.cornerAction(label: String,enabled: Boolean,onPressed: (Boo
         } else hideFromAccessibility()
     }.then(if(enabled) Modifier.pointerInput(Unit) {
         awaitEachGesture {
-            val down=awaitFirstDown();gate?.excludedDown = down.uptimeMillis;down.consume();latestPress.value(true)
-            var finger=down.position
+            val down=awaitFirstDown();down.consume();latestPress.value(true)
             var armed=true
             try {
                 while(true) {
                     val event=awaitPointerEvent()
                     val change=event.changes.firstOrNull {it.id==down.id} ?: break
                     val slop=12.dp.toPx()
-                    // Both event positions are expressed in the current local frame. The ball can
-                    // fly underneath a stationary finger without turning that tap into a drag.
-                    finger = if (movingOrigin) finger + (change.position - change.previousPosition) else change.position
-                    if(change.isConsumed||finger.x < -slop||finger.y < -slop||finger.x>size.width+slop||finger.y>size.height+slop) {
+                    if(change.isConsumed||change.position.x < -slop||change.position.y < -slop||change.position.x>size.width+slop||change.position.y>size.height+slop) {
                         armed=false;latestPress.value(false)
                     }
                     if(!change.pressed) {
@@ -246,27 +221,5 @@ private data class CornerClip(val rect: CornerRect,val radius: Float): Shape {
     override fun createOutline(size: Size,layoutDirection: LayoutDirection,density: Density): Outline {
         val d=density.density
         return Outline.Rounded(RoundRect(Rect(rect.left*d,rect.top*d,rect.right*d,rect.bottom*d),CornerRadius(radius*d)))
-    }
-}
-
-/** The rounded window swept along the vector from the avatar to the back button. */
-private data class TurningDock(val radius: Dp, val dx: Float, val dy: Float, val angle: Float) : Shape {
-    override fun createOutline(size: Size, layoutDirection: LayoutDirection, density: Density): Outline {
-        val x = dx.coerceIn(0f,size.width)
-        val y = dy.coerceIn(0f,size.height)
-        val r = minOf(with(density){ radius.toPx() }, (size.width-x)/2, (size.height-y)/2)
-        val path = Path()
-        val stops = floatArrayOf(0f,90f,90f+angle,180f,270f,270f+angle,360f)
-        for (i in 1 until stops.size) {
-            val a = stops[i-1]; val b = stops[i]
-            if (b <= a) continue
-            val mid = (a+b)/2
-            val far = mid < 90f+angle || mid > 270f+angle
-            val cx = (if(mid<90f || mid>270f) size.width-x-r else r) + if(far) x else 0f
-            val cy = (if(mid<180f) size.height-y-r else r) + if(far) y else 0f
-            path.arcTo(Rect(cx-r,cy-r,cx+r,cy+r),a,b-a,i==1)
-        }
-        path.close()
-        return Outline.Generic(path)
     }
 }

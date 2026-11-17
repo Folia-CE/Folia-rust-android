@@ -99,9 +99,8 @@ pub fn layout(scene: &Scene<'_>, size: Size, offset: f32) -> Layout {
     let header_width = (content_width - bleed - saved.min(0.0).abs()).max(12.0 * REM).min(content_width);
 
     let artist_box = artist_px * 1.5;
-    let title_text = if scene.title.is_empty() { "Monet" } else { scene.title.as_ref() };
-    let title_rows =
-        text::wrap(title_text, title_px, scene.monet.typography.font(SEMIBOLD), header_width).len().clamp(1, 2);
+    let title_text = if scene.title.is_empty() { "Monet" } else { scene.title.as_str() };
+    let title_rows = text::wrap(title_text, title_px, SEMIBOLD, header_width).len().clamp(1, 2);
     let title_line = title_px * 1.06;
     // Padding-block 0.25em with margins -0.25em / -0.12em leaves 0.13em below the line boxes.
     let title_block = title_rows as f32 * title_line + 0.13 * title_px;
@@ -137,7 +136,7 @@ pub fn layout(scene: &Scene<'_>, size: Size, offset: f32) -> Layout {
     let rail =
         Rectangle { x: content_x - glow, y: album.y + album_line + 24.0, width: rail_width, height: rail_height };
     let description = Rectangle { x: content_x, y: rail.y + rail_height, width: content_width, height: 50.0 };
-    let capsule = (describe && !scene.monet.shell_capsule).then(|| {
+    let capsule = describe.then(|| {
         let label = capsule_label(scene);
         let label_width = text::shape(&label, 12.0, iced_core::Font::DEFAULT).width;
         Rectangle { x: content_x, y: description.y + 16.0, width: 2.0 + 32.0 + 10.0 + 12.0 + label_width, height: 34.0 }
@@ -210,7 +209,6 @@ fn column_box(width: f32, column: f32) -> (f32, f32) {
 
 /// `theme.description || theme.name || 'Monet'`, upper-cased like the capsule's `uppercase`.
 pub fn capsule_label(scene: &Scene<'_>) -> String {
-    let name =
-        scene.monet.description.as_deref().filter(|text| !text.trim().is_empty()).unwrap_or(&scene.theme.name).trim();
+    let name = scene.theme.name.trim();
     if name.is_empty() { "MONET".to_owned() } else { name.to_uppercase() }
 }

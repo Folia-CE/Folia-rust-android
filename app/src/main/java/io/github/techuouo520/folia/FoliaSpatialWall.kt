@@ -76,15 +76,9 @@ internal fun FoliaSpatialWall(bridge: FoliaBridge,items: List<WallItem>,shell: S
         dark=LocalFoliaDark.current,playingKey=playingKey,playing=shell.playback.state==TransportState.PLAYING,
         onCollectionVisible=onCollectionVisible,
         onPreload={ item -> lookup.value[item.key]?.let {collections.request(it.key,it.title,it.url)} },
-        collectionContent={ item, style, interactive, active, expanded ->
+        collectionContent={ item, style, interactive, active, expanded, ready ->
             CollectionDetail(bridge,collections,item,style,interactive,active,expanded,shell,bottomInset,lookup.value[item.key]?.url.orEmpty(),
-                onFramePresented,onPlayTracks,onToggle,action)
-        },
-        albumContent={ key ->
-            val card = lookup.value[key]
-            val selected = key == playingKey || (card?.kind == "explore-song" &&
-                identities[key] == (playback.provider to playback.onlineId))
-            MonetLyrics(bridge, playback, LocalFoliaDark.current, selected, card?.kind == "fm")
+                ready,onFramePresented,onPlayTracks,onToggle,action)
         },
         source=source,onPlay={ item -> lookup.value[item.key]?.let(onOpen) },onToggle=onToggle,
         onNext={ item -> scope.launch {

@@ -8,7 +8,6 @@ private fun settle(m: CornerMotion,open: Boolean,hz: Int) {
     check(!moving) {"motion did not stop at $hz Hz"}
 }
 fun main() {
-    checkGripDock()
     for(hz in listOf(60,90,120)) for(right in listOf(false,true)) {
         val m=CornerMotion();m.bounds(360f,480f,right)
         closeTo(m.rect().width,50f);closeTo(m.rect().height,50f);closeTo(m.radius(),25f)
@@ -49,28 +48,6 @@ fun main() {
         settle(m,false,hz);closeTo(m.rect().width,50f);closeTo(m.rect().height,50f)
     }
     for(hz in listOf(60,90,120)) {
-        // The lower-right player uses the very same path reflected around its measured height.
-        val upper = CornerMotion(initiallyOpen = true)
-        val lower = CornerMotion(bottomOrigin = true, initiallyOpen = true)
-        val height = 120f
-        listOf(upper, lower).forEach { it.bounds(360f,height,true) }
-        repeat(hz * 3) { frame ->
-            val open = frame in hz / 4 .. hz / 2 || frame in hz .. hz + 6
-            val pressed = frame in hz + 3 .. hz + 8
-            check(upper.step(open,1f/hz,pressed) == lower.step(open,1f/hz,pressed))
-            val a = upper.rect()
-            val b = lower.rect()
-            closeTo(a.left,b.left); closeTo(a.right,b.right)
-            closeTo(height - a.top,b.bottom); closeTo(height - a.bottom,b.top)
-            closeTo(upper.blur,lower.blur)
-            val c = upper.content(130f,28f)
-            val d = lower.content(130f,height - 28f)
-            closeTo(c.x,d.x); closeTo(-c.y,d.y); closeTo(c.alpha,d.alpha)
-        }
-        check(lower.docked)
-        closeTo(lower.rect().right,360f); closeTo(lower.rect().bottom,height)
-        closeTo(lower.rect().width,50f); closeTo(lower.rect().height,50f)
-
         val dock=CornerMotion().apply {bounds(50f,100f,false)}
         val window=CornerMotion().apply {bounds(360f,480f,false)}
         fun step(detail: Boolean,account: Boolean): Boolean {

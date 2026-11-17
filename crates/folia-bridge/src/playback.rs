@@ -59,6 +59,7 @@ impl Queued {
 
 type AudioFetch = Arc<dyn Fn(&str, &str, AudioQuality) -> Result<PathBuf, String> + Send + Sync>;
 type LyricsFetch = Arc<dyn Fn(&str, &str) -> Result<Option<Lyrics>, String> + Send + Sync>;
+type ArtworkFetch = Arc<dyn Fn(&str, &str) -> Result<Vec<u8>, String> + Send + Sync>;
 
 #[derive(serde::Serialize,serde::Deserialize)]
 struct ResumeState { version:u8, tracks:Vec<Queued>, index:usize, position:f64, repeat:Repeat }
@@ -73,9 +74,12 @@ struct Playback {
     token: u64,
     loading: bool,
     quality: AudioQuality,
-    lyrics: Option<(i64, Arc<Lyrics>)>,
+    lyrics: Option<(i64, Lyrics)>,
+    artwork: Option<(i64, Vec<u8>)>,
+    artwork_for: Option<i64>,
     audio_fetch: AudioFetch,
     lyrics_fetch: LyricsFetch,
+    artwork_fetch: ArtworkFetch,
     checkpoint: PathBuf,
     last_save: std::time::Instant,
     position_on_load: f64,
@@ -89,6 +93,7 @@ impl Playback {
         commands: Sender<Command>,
         audio_fetch: AudioFetch,
         lyrics_fetch: LyricsFetch,
+        artwork_fetch: ArtworkFetch,
         checkpoint: PathBuf,
     ) -> Self {
         Self {
@@ -102,9 +107,11 @@ impl Playback {
             loading: false,
             quality: AudioQuality::High,
             lyrics: None,
+            artwork: None,
+            artwork_for: None,
             audio_fetch,
             lyrics_fetch,
-            checkpoint, last_save:std::time::Instant::now(),
+            artwork_fetch, checkpoint, last_save:std::time::Instant::now(),
             position_on_load:0.0, restored:false, want_play:false, recovering:false,
         }
     }
@@ -151,11 +158,7 @@ impl Playback {
             Command::PlayAll { tracks, start, reply } => reply_send(reply, self.play_all(tracks, start)),
             Command::Play(reply) => reply_send(reply, self.play()),
             Command::Pause(reply) => reply_send(reply, self.pause()),
-            Command::Seek { seconds, owner, reply } => {
-                let current = owner.is_none_or(|(generation, index)| self.generation == generation
-                    && self.queue.current_index().is_some_and(|i| as_i32(i) == index));
-                reply_send(reply, if current { self.seek(seconds) } else { Ok(()) });
-            }
+            Command::Seek { seconds, reply } => reply_send(reply, self.seek(seconds)),
             Command::Stop(reply) => reply_send(reply, self.stop()),
             Command::SetVolume { volume, reply } => reply_send(reply, self.set_volume(volume)),
             Command::Volume(reply) => reply_send(reply, Ok(self.volume())),
@@ -170,9 +173,10 @@ impl Playback {
             Command::PlayTracks { tracks, start, reply } => reply_send(reply, self.play_all(tracks, start)),
             Command::SetQuality { quality, reply } => reply_send(reply, self.set_quality(quality)),
             Command::Lyrics(reply) => reply_send(reply, Ok(self.lyric_view())),
+            Command::Artwork(reply) => reply_send(reply, Ok(self.artwork_bytes())),
             Command::Loaded { token, result } => self.loaded(token, result),
-            Command::LyricsReady { token, id, lyrics } if token == self.token => self.store_lyrics(id, lyrics),
-            Command::LyricsReady { .. } => {},
+            Command::LyricsReady { id, lyrics } => self.store_lyrics(id, lyrics),
+            Command::ArtworkReady { id, bytes } => self.store_artwork(id, bytes),
             Command::Shutdown => {}
         }
     }
@@ -356,7 +360,6 @@ impl Playback {
         if !self.restored {self.position_on_load=0.0;self.want_play=true;self.recovering=false;}
         self.restored=false;
         self.token = self.token.wrapping_add(1);
-        self.lyrics = None;
         self.loading = true;
         if let Some(player) = self.player.as_ref() {
             player.stop();
@@ -374,7 +377,6 @@ impl Playback {
             self.loading = false;
             return self.fail();
         }
-        self.spawn_lyrics(&track);
         tracing::info!(title = %track.title, provider = %track.provider, song = %track.online_id, "fetching audio");
         let token = self.token;
         let fetch = Arc::clone(&self.audio_fetch);
@@ -411,6 +413,9 @@ impl Playback {
                 match self.ensure_player() {
                     Ok(player) => {
                         player.load_at(&path,position,playing);
+                        if let Some(track) = self.queue.current().cloned() {
+                            self.spawn_lyrics(&track);
+                        }
                         tracing::info!(path = %path.display(), "online audio ready");
                     }
                     Err(error) => tracing::error!(error = %error, "cannot play the downloaded audio"),
@@ -426,8 +431,7 @@ impl Playback {
         }
     }
 
-    fn spawn_lyrics(&mut self, track: &Queued) {
-        let token = self.token;
+    fn spawn_lyrics(&self, track: &Queued) {
         let id = track.id;
         let path = track.path.clone();
         let provider = track.provider.clone();
@@ -440,19 +444,18 @@ impl Playback {
             } else {
                 fetch(&provider, &song).ok().flatten()
             };
-            if commands.send(Command::LyricsReady { token, id, lyrics }).is_err() {
+            if commands.send(Command::LyricsReady { id, lyrics }).is_err() {
                 tracing::warn!("playback thread dropped lyrics");
             }
         });
         if let Err(error) = spawned {
-            self.store_lyrics(id, None);
             tracing::error!(error = &error as &dyn std::error::Error, "cannot start lyric loading");
         }
     }
 
     fn store_lyrics(&mut self, id: i64, lyrics: Option<Lyrics>) {
         if self.queue.current().is_some_and(|track| track.id == id) {
-            self.lyrics = Some((id, Arc::new(lyrics.unwrap_or_default())));
+            self.lyrics = lyrics.map(|lyrics| (id, lyrics));
             tracing::info!(id, ready = self.lyrics.is_some(), "lyrics stored");
         }
     }
@@ -498,6 +501,44 @@ impl Playback {
             line_index: line_index.map(|index| i32::try_from(index).unwrap_or(0)).unwrap_or(-1),
             word_index,
             lines,
+        }
+    }
+
+    fn artwork_bytes(&mut self) -> Option<Vec<u8>> {
+        let track = self.queue.current()?.clone();
+        if let Some((id, bytes)) = &self.artwork
+            && *id == track.id
+        {
+            return Some(bytes.clone());
+        }
+        if self.artwork_for == Some(track.id) {
+            return None;
+        }
+        self.artwork_for = Some(track.id);
+        let fetch = Arc::clone(&self.artwork_fetch);
+        let commands = self.commands.clone();
+        let id = track.id;
+        let path = track.path.to_string_lossy().into_owned();
+        let url = track.cover_url.clone();
+        let spawned =
+            std::thread::Builder::new().name("folia-artwork".into()).spawn(move || match fetch(&path, &url) {
+                Ok(bytes) => {
+                    if commands.send(Command::ArtworkReady { id, bytes }).is_err() {
+                        tracing::warn!("playback thread dropped artwork");
+                    }
+                }
+                Err(error) => tracing::info!(error, "track has no artwork"),
+            });
+        if let Err(error) = spawned {
+            tracing::error!(error = &error as &dyn std::error::Error, "cannot start artwork loading");
+        }
+        None
+    }
+
+    fn store_artwork(&mut self, id: i64, bytes: Vec<u8>) {
+        if self.queue.current().is_some_and(|track| track.id == id) {
+            self.artwork = Some((id, bytes));
+            tracing::info!(id, "artwork ready");
         }
     }
 
@@ -550,10 +591,6 @@ impl Playback {
             provider: current.map(|track| track.provider.clone()).unwrap_or_default(),
             online_id: current.map(|track| track.online_id.clone()).unwrap_or_default(),
             cover_url: current.map(|track| track.cover_url.clone()).unwrap_or_default(),
-            current_lyric: self.lyrics.as_ref()
-                .filter(|(id, lyrics)| Some(*id) == current.map(|track| track.id) && !lyrics.lines.is_empty())
-                .map(|(_, lyrics)| folia_lyrics::active_line(&lyrics.lines, position)
-                    .map(|index| lyrics.lines[index].text.clone()).unwrap_or_default()),
         }
     }
 }
@@ -563,7 +600,7 @@ enum Command {
     PlayAll { tracks: Vec<LibraryTrack>, start: i32, reply: Sender<Result<(), BridgeError>> },
     Play(Sender<Result<(), BridgeError>>),
     Pause(Sender<Result<(), BridgeError>>),
-    Seek { seconds: f64, owner: Option<(i64,i32)>, reply: Sender<Result<(), BridgeError>> },
+    Seek { seconds: f64, reply: Sender<Result<(), BridgeError>> },
     Stop(Sender<Result<(), BridgeError>>),
     SetVolume { volume: f32, reply: Sender<Result<(), BridgeError>> },
     Volume(Sender<Result<f32, BridgeError>>),
@@ -577,34 +614,14 @@ enum Command {
     PlayTracks { tracks: Vec<LibraryTrack>, start: i32, reply: Sender<Result<(), BridgeError>> },
     SetQuality { quality: AudioQuality, reply: Sender<Result<(), BridgeError>> },
     Lyrics(Sender<Result<crate::LyricSnapshot, BridgeError>>),
+    Artwork(Sender<Result<Option<Vec<u8>>, BridgeError>>),
     Shutdown,
     Loaded { token: u64, result: Result<PathBuf, String> },
-    LyricsReady { token: u64, id: i64, lyrics: Option<Lyrics> },
-}
-
-#[cfg(target_os = "android")]
-type MonetFeed = Arc<Mutex<Option<Arc<crate::monet::Input>>>>;
-
-#[cfg(target_os = "android")]
-impl Playback {
-    fn publish_monet(&self, feed: &MonetFeed) {
-        let mut slot = feed.lock();
-        let Some(track) = self.queue.current() else { *slot = None; return };
-        let lyrics = self.lyrics.as_ref().map(|(_, lyrics)| lyrics);
-        let same = slot.as_ref().is_some_and(|old| old.token == self.token &&
-            std::path::Path::new(&old.track.path) == track.path &&
-            match (&old.clock, &self.player) { (Some(c), Some(p)) => c.belongs_to(p), (None,None) => true, _ => false } &&
-            match (&old.lyrics, lyrics) { (Some(a),Some(b)) => Arc::ptr_eq(a,b), (None,None) => true, _ => false });
-        if !same {
-            *slot = Some(Arc::new(crate::monet::Input { token: self.token, track: track.to_track(),
-                lyrics: lyrics.cloned(), clock: self.player.as_ref().map(Player::clock) }));
-        }
-    }
+    LyricsReady { id: i64, lyrics: Option<Lyrics> },
+    ArtworkReady { id: i64, bytes: Vec<u8> },
 }
 
 pub(crate) struct PlaybackHost {
-    #[cfg(target_os = "android")]
-    monet: MonetFeed,
     commands: Mutex<Option<Sender<Command>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -613,22 +630,19 @@ impl PlaybackHost {
     pub(crate) fn start(
         audio_fetch: AudioFetch,
         lyrics_fetch: LyricsFetch,
+        artwork_fetch: ArtworkFetch,
         checkpoint: PathBuf,
     ) -> Result<Self, BridgeError> {
         let (commands, receiver) = mpsc::channel();
-        #[cfg(target_os = "android")]
-        let monet = MonetFeed::default();
-        #[cfg(target_os = "android")]
-        let publisher = monet.clone();
         let thread_commands = commands.clone();
         let thread = std::thread::Builder::new()
             .name("folia-playback".into())
-            .spawn(move || run(receiver, thread_commands, audio_fetch, lyrics_fetch, checkpoint, #[cfg(target_os = "android")] publisher))
+            .spawn(move || run(receiver, thread_commands, audio_fetch, lyrics_fetch, artwork_fetch, checkpoint))
             .map_err(|error| {
                 tracing::error!(error = &error as &dyn std::error::Error, "cannot start the playback thread");
                 BridgeError::Playback { reason: error.to_string() }
             })?;
-        Ok(Self { commands: Mutex::new(Some(commands)), thread: Mutex::new(Some(thread)), #[cfg(target_os = "android")] monet })
+        Ok(Self { commands: Mutex::new(Some(commands)), thread: Mutex::new(Some(thread)) })
     }
 
     pub(crate) fn play_all(&self, tracks: Vec<LibraryTrack>, start: i32) -> Result<(), BridgeError> {
@@ -644,11 +658,7 @@ impl PlaybackHost {
     }
 
     pub(crate) fn seek(&self, seconds: f64) -> Result<(), BridgeError> {
-        self.roundtrip(|reply| Command::Seek { seconds, owner: None, reply })
-    }
-
-    pub(crate) fn seek_queue_item(&self, seconds: f64, generation: i64, index: i32) -> Result<(), BridgeError> {
-        self.roundtrip(|reply| Command::Seek { seconds, owner: Some((generation,index)), reply })
+        self.roundtrip(|reply| Command::Seek { seconds, reply })
     }
 
     pub(crate) fn stop(&self) -> Result<(), BridgeError> {
@@ -703,11 +713,12 @@ impl PlaybackHost {
         self.roundtrip(|reply| Command::SetQuality { quality, reply })
     }
 
-    #[cfg(target_os = "android")]
-    pub(crate) fn monet_input(&self) -> Option<Arc<crate::monet::Input>> { self.monet.lock().clone() }
-
     pub(crate) fn lyrics(&self) -> Result<crate::LyricSnapshot, BridgeError> {
         self.roundtrip(Command::Lyrics)
+    }
+
+    pub(crate) fn artwork(&self) -> Result<Option<Vec<u8>>, BridgeError> {
+        self.roundtrip(Command::Artwork)
     }
 
     fn roundtrip<T>(&self, make: impl FnOnce(Sender<Result<T, BridgeError>>) -> Command) -> Result<T, BridgeError> {
@@ -748,14 +759,12 @@ fn run(
     commands: Sender<Command>,
     audio: AudioFetch,
     lyrics: LyricsFetch,
+    artwork: ArtworkFetch,
     checkpoint: PathBuf,
-    #[cfg(target_os = "android")] monet: MonetFeed,
 ) {
-    let mut playback = Playback::new(commands, audio, lyrics, checkpoint);
+    let mut playback = Playback::new(commands, audio, lyrics, artwork,checkpoint);
     playback.restore();
     loop {
-        #[cfg(target_os = "android")]
-        playback.publish_monet(&monet);
         match receiver.recv_timeout(std::time::Duration::from_millis(250)) {
             Ok(Command::Shutdown)=>break,
             Ok(command)=> {

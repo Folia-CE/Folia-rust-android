@@ -27,7 +27,6 @@ out vec3 v_local_normal;
 flat out vec3 v_incident;
 flat out vec4 v_art;
 flat out vec4 v_info;
-flat out float v_lyrics;
 flat out vec4 v_material;
 flat out float v_scale;
 flat out vec4 v_emitter;
@@ -42,5 +41,5 @@ void main(){
  gl_Position=vec4(p.x/u_screen.x*2.-1.,1.-p.y/u_screen.y*2.,clamp(p.z/4000.,-.98,.98),1.);
  v_scale=length(a_m0.xyz);v_local=a_position;v_local_normal=a_normal;v_normal=normalize(mat3(pose)*a_normal);
  v_emitter=a_emitter;v_emitter_normal=a_emitter_normal;v_emitter_color=a_emitter_color;
- v_incident=vec3(a_m0.z,a_m1.z,a_m2.z)/max(v_scale,.001);v_art=a_art;v_info=a_info;v_lyrics=step(1.5,a_info.x);v_info.x-=2.*v_lyrics;v_material=a_material;
+ v_incident=vec3(a_m0.z,a_m1.z,a_m2.z)/max(v_scale,.001);v_art=a_art;v_info=a_info;v_material=a_material;
 }

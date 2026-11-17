@@ -3,7 +3,6 @@ use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
 
 use folia_library::{CoverCache, cover_bytes};
 use parking_lot::{Condvar, Mutex};
@@ -31,7 +30,6 @@ pub enum CoverLookup {
 #[derive(Clone)]
 enum Cached {
     Missing,
-    RetryAfter(Instant),
     Ready { bytes: Vec<u8> },
 }
 
@@ -77,7 +75,7 @@ impl CoverHost {
                     let decoded = load_bytes(&ask, fetch_url.as_ref());
                     let bytes = match &decoded {
                         Cached::Ready { bytes } => bytes.len(),
-                        Cached::Missing | Cached::RetryAfter(_) => 64,
+                        Cached::Missing => 0,
                     };
                     cache.lock().insert(ask.key.clone(), Some(decoded), bytes);
                     pending.lock().remove(&ask.key);
@@ -92,24 +90,15 @@ impl CoverHost {
     }
 
     pub(crate) fn request(&self, asks: Vec<CoverAsk>) {
-        self.enqueue(asks, false);
-    }
-
-    fn enqueue(&self, asks: Vec<CoverAsk>, playback: bool) {
         let mut queue = self.queue.0.lock();
         let mut pending = self.pending.lock();
         let cache = self.cache.lock();
         let mut added = false;
         for ask in asks {
-            let needs_load = match cache.peek(&ask.key) {
-                None => true,
-                Some(Some(Cached::RetryAfter(when))) => Instant::now() >= *when,
-                _ => false,
-            };
-            if ask.key.is_empty() || !needs_load || !pending.insert(ask.key.clone()) {
+            if ask.key.is_empty() || cache.peek(&ask.key).is_some() || !pending.insert(ask.key.clone()) {
                 continue;
             }
-            if playback { queue.items.push_front(ask); } else { queue.items.push_back(ask); }
+            queue.items.push_back(ask);
             added = true;
         }
         drop(cache);
@@ -120,26 +109,14 @@ impl CoverHost {
     }
 
     pub(crate) fn lookup(&self, key: &str) -> CoverLookup {
-        self.result(&key.to_owned(), false)
-    }
-
-    pub(crate) fn playback(&self, path: String, url: String) -> CoverLookup {
-        if path.is_empty() && url.is_empty() { return CoverLookup::Missing; }
-        let key = format!("playback:1024:{}:{path}{url}", path.len());
-        self.enqueue(vec![CoverAsk { key: key.clone(), path, url, width: 1024, height: 1024 }], true);
-        self.result(&key, true)
-    }
-
-    fn result(&self, key: &String, playback: bool) -> CoverLookup {
         let mut cache = self.cache.lock();
-        let found = cache.peek(key).cloned();
+        let found = cache.peek(&key.to_owned()).cloned();
         if matches!(found, Some(Some(Cached::Ready { .. }))) {
-            cache.touch(key);
+            cache.touch(&key.to_owned());
         }
         match found {
             Some(Some(Cached::Ready { bytes })) => CoverLookup::Ready { bytes },
-            Some(Some(Cached::RetryAfter(_))) if playback => CoverLookup::Pending,
-            Some(Some(Cached::Missing | Cached::RetryAfter(_))) | Some(None) => CoverLookup::Missing,
+            Some(Some(Cached::Missing)) | Some(None) => CoverLookup::Missing,
             None => CoverLookup::Pending,
         }
     }
@@ -159,32 +136,22 @@ impl Drop for CoverHost {
 
 fn load_bytes(ask: &CoverAsk, fetch_url: &CoverFn) -> Cached {
     let edge = u32::try_from(ask.width.max(ask.height)).unwrap_or(1).max(1);
-    if !ask.path.is_empty()
-        && let Some(bytes) = cover_bytes(Path::new(&ask.path)).filter(|bytes| !bytes.is_empty())
-    {
-        return Cached::Ready { bytes };
-    }
-    if ask.url.is_empty() {
-        return Cached::Missing;
-    }
-    match fetch_url(&ask.url, edge) {
-        Ok(bytes) if !bytes.is_empty() => Cached::Ready { bytes },
-        _ => Cached::RetryAfter(Instant::now() + Duration::from_secs(5)),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cached_audio_without_embedded_art_uses_url_and_network_failure_is_retryable() {
-        let ask = CoverAsk { key: "track".into(), path: "/missing/audio.flac".into(),
-            url: "cover".into(), width: 1024, height: 1024 };
-        assert!(matches!(load_bytes(&ask, &|_, _| Err("offline".into())), Cached::RetryAfter(_)));
-        assert!(matches!(load_bytes(&ask, &|url, edge| {
-            assert_eq!((url, edge), ("cover", 1024));
-            Ok(vec![1, 2, 3])
-        }), Cached::Ready { bytes } if bytes == [1, 2, 3]));
+    let bytes = if !ask.path.is_empty() {
+        cover_bytes(Path::new(&ask.path))
+    } else if !ask.url.is_empty() {
+        match fetch_url(&ask.url, edge) {
+            Ok(bytes) if !bytes.is_empty() => Some(bytes),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::warn!(key = %ask.key, error, "cover download failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    match bytes {
+        Some(bytes) => Cached::Ready { bytes },
+        None => Cached::Missing,
     }
 }

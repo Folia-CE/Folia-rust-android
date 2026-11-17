@@ -5,9 +5,6 @@ use folia_core::LanguagePreference;
 use folia_i18n::I18n;
 use folia_store::AppDirs;
 
-#[cfg(target_os = "android")]
-pub use lyricchain_native::*;
-
 mod covers;
 mod library;
 mod online;
@@ -19,8 +16,6 @@ pub use wall::{PointerEnd, WallBoard};
 
 #[cfg(target_os = "android")]
 mod android;
-#[cfg(target_os = "android")]
-mod monet;
 
 uniffi::setup_scaffolding!();
 
@@ -141,7 +136,6 @@ pub struct PlaybackSnapshot {
     pub provider: String,
     pub online_id: String,
     pub cover_url: String,
-    pub current_lyric: Option<String>,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -300,7 +294,8 @@ impl FoliaBridge {
         let library = library::LibraryHost::open(&dirs.data.join("library.db"))?;
         let online = online::OnlineHost::start(&dirs.cache)?;
         let covers = covers::CoverHost::start(online.cover_fetcher());
-        let playback = playback::PlaybackHost::start(online.audio_fetcher(), online.lyrics_fetcher(), dirs.config.join("playback-resume.json"))?;
+        let artwork = artwork_fetcher(online.cover_fetcher());
+        let playback = playback::PlaybackHost::start(online.audio_fetcher(), online.lyrics_fetcher(), artwork, dirs.config.join("playback-resume.json"))?;
         playback.set_volume(settings.volume())?;
         playback.set_repeat(repeat_mode(settings.repeat()))?;
         playback.set_quality(settings.audio_quality())?;
@@ -367,10 +362,6 @@ impl FoliaBridge {
         self.playback.seek(seconds)
     }
 
-    pub fn seek_queue_item(&self, seconds: f64, generation: i64, index: i32) -> Result<(), BridgeError> {
-        self.playback.seek_queue_item(seconds,generation,index)
-    }
-
     pub fn stop(&self) -> Result<(), BridgeError> {
         self.playback.stop()
     }
@@ -433,16 +424,7 @@ impl FoliaBridge {
     }
 
     pub fn artwork(&self) -> Result<Option<Vec<u8>>, BridgeError> {
-        let track = self.playback.status()?;
-        Ok(match self.playback_cover(track.path, track.cover_url) {
-            covers::CoverLookup::Ready { bytes } => Some(bytes),
-            _ => None,
-        })
-    }
-
-    /// Resolve the artwork for the captured source, even if the playback head has since moved.
-    pub fn playback_cover(&self, path: String, url: String) -> covers::CoverLookup {
-        self.covers.playback(path, url)
+        self.playback.artwork()
     }
 
     pub fn set_system_locale(&self, tag: String) {
@@ -658,6 +640,21 @@ impl FoliaBridge {
     pub fn directories(&self) -> &AppDirs {
         &self.dirs
     }
+}
+
+type ArtworkFn = dyn Fn(&str, &str) -> Result<Vec<u8>, String> + Send + Sync;
+
+fn artwork_fetcher(cover: std::sync::Arc<online::CoverFn>) -> std::sync::Arc<ArtworkFn> {
+    std::sync::Arc::new(move |path: &str, url: &str| {
+        if !path.is_empty() {
+            return folia_library::cover_bytes(std::path::Path::new(path))
+                .ok_or_else(|| "no embedded cover".to_owned());
+        }
+        if url.is_empty() {
+            return Err("no cover".to_owned());
+        }
+        cover(url, 512)
+    })
 }
 
 fn repeat_mode(mode: folia_core::Repeat) -> RepeatMode {

@@ -3,7 +3,7 @@
 // wheel paging through the lyrics.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Arc;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use folia_core::Line;
@@ -14,11 +14,9 @@ use iced_widget::canvas::Frame;
 use super::ink::{self, Mask};
 use super::layout::{Layout, SEMIBOLD};
 use super::motion::{self, SWAP};
-use super::rail_gpu::{Row as InkRow, Rows};
 use super::text::{self, Shaped};
 use crate::anim::{Ease, tween};
 use crate::{Place, Scene, color};
-use std::cell::RefCell;
 
 const MEDIUM: iced_core::Font = iced_core::Font { weight: iced_core::font::Weight::Medium, ..iced_core::Font::DEFAULT };
 const IDLE_RESET: Duration = Duration::from_millis(1800);
@@ -55,8 +53,6 @@ struct Visual {
     offset: i32,
     status: Status,
     y: f32,
-    velocity: f32,
-    scale_velocity: f32,
     scale: f32,
     opacity: f32,
     blur: f32,
@@ -64,16 +60,16 @@ struct Visual {
     z: i32,
 }
 
-pub(super) struct Token {
-    pub(super) start: usize,
-    pub(super) end: usize,
-    pub(super) timing: Option<(f64, f64)>,
+struct Token {
+    start: usize,
+    end: usize,
+    timing: Option<(f64, f64)>,
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct Span {
-    pub(super) start: usize,
-    pub(super) end: usize,
+struct Span {
+    start: usize,
+    end: usize,
 }
 
 struct Track {
@@ -87,111 +83,57 @@ struct Track {
 }
 
 /// A line's reserved box, measured once per layout (`measureMonetLineLayout`).
-pub(super) struct Measured {
-    timeline: super::long_note::Timeline,
-    keywords: Vec<crate::monet_appearance::WordColorRange>,
+struct Measured {
     shaped: Shaped,
     /// Each glyph's ink, `(top, bottom)` from the baseline, for the glow halo.
-    ink: std::sync::OnceLock<Vec<(f32, f32)>>,
+    ink: Vec<(f32, f32)>,
     tokens: Vec<Token>,
     rows: Vec<Span>,
+    visible: usize,
+    clipped: bool,
     line_height: f32,
     pad_top: f32,
-    pad_bottom: f32,
+    text_height: f32,
     track: Option<Track>,
-}
-
-impl Measured {
-    pub(super) fn masks(
-        &self,
-        line: &Line,
-        typography: crate::Typography,
-        px: f32,
-        density: f32,
-        active: bool,
-        cached: &std::collections::HashSet<u64>,
-    ) -> Vec<super::rail_gpu::CachedMask> {
-        use super::rail_gpu::{mask_key, raster_mask};
-        let mut masks = Vec::new();
-        let mut add = |content: &str, font, px, height| {
-            if !cached.contains(&mask_key(content, font, px, height))
-                && let Some(m) = raster_mask(content, font, px, height, density)
-            {
-                masks.push(m);
-            }
-        };
-        for span in self.rows.iter().take(self.visible(active)) {
-            add(&line.text[span.start..span.end], typography.font(SEMIBOLD), px, self.line_height);
-        }
-        if active && let Some(track) = &self.track {
-            for span in &track.rows {
-                add(
-                    &track.text[span.start..span.end],
-                    typography.subtitle.unwrap_or_else(|| typography.font(MEDIUM)),
-                    track.px,
-                    track.line_height,
-                );
-            }
-        }
-        masks
-    }
-    fn visible(&self, active: bool) -> usize {
-        self.rows.len().min(if active { ACTIVE_ROWS } else { INACTIVE_ROWS })
-    }
-    fn text_height(&self, active: bool) -> f32 {
-        self.visible(active) as f32 * self.line_height + self.pad_top + self.pad_bottom
-    }
-    fn height(&self, active: bool) -> f32 {
-        self.text_height(active) + if active { self.track.as_ref().map_or(0., |t| t.height) } else { 0. }
-    }
+    height: f32,
 }
 
 /// Wheel paging: the line the rail is held on, and where it moved from.
 #[derive(Debug, Default)]
 struct Scroll {
     anchor: Option<usize>,
-    origin: Vec<Visual>,
+    /// The anchor before the last step; `None` is the playing position.
+    from: Option<usize>,
     moved: Option<Instant>,
     input: Option<Instant>,
     /// Released anchor and when, so the rail springs back to the playing position.
-    released: Option<Instant>,
+    released: Option<(usize, Instant)>,
     wheel: f32,
-    stepped: bool,
     direction: f32,
 }
 
 /// The rail's measurements and wheel state, kept across frames by the canvas.
 #[derive(Default)]
 pub struct Rail {
-    measured: Vec<(u64, Arc<Measured>)>,
+    measured: Vec<(u64, Rc<Measured>)>,
     events: (usize, usize, Vec<f64>),
-    history: Option<(u64, Vec<Visual>, Vec<Visual>)>,
-    presented: Vec<Visual>,
-    changes: Vec<(usize, Option<f64>)>,
     scroll: Scroll,
-    preparation: std::cell::OnceCell<Option<super::preparation::Preparation>>,
     /// The line boxes drawn last frame, in stage coordinates, with the line each one shows.
     hits: Vec<(usize, Rectangle)>,
 }
 
-pub(super) struct Ctx<'a> {
-    pub(super) theme: &'a crate::MonetAppearance,
-    pub(super) keywords: bool,
-    pub(super) typography: crate::Typography,
-    pub(super) lines: &'a [Line],
-    pub(super) lyric_px: f32,
-    pub(super) translation_px: f32,
-    pub(super) inactive_scale: f32,
-    pub(super) width: f32,
-    pub(super) height: f32,
+struct Ctx<'a> {
+    lines: &'a [Line],
+    lyric_px: f32,
+    translation_px: f32,
+    inactive_scale: f32,
+    width: f32,
+    height: f32,
 }
 
 impl<'a> Ctx<'a> {
     fn new(scene: &'a Scene<'_>, layout: &Layout) -> Self {
         Ctx {
-            theme: scene.monet,
-            keywords: scene.tuning.flag(super::tuning::manifest(), "keywordColoringEnabled"),
-            typography: scene.monet.typography,
             lines: &scene.lyrics.lines,
             lyric_px: layout.lyric_px,
             translation_px: layout.translation_px,
@@ -295,7 +237,7 @@ fn tokens(line: &Line) -> Vec<Token> {
 
 /// Rows the way the DOM sets the tokens: each is an `inline-block`, so a row only breaks between them, and a token
 /// wider than the column wraps inside itself.
-fn wrap_tokens(text: &str, shaped: &Shaped, tokens: &[Token], px: f32, width: f32, font: iced_core::Font) -> Vec<Span> {
+fn wrap_tokens(text: &str, shaped: &Shaped, tokens: &[Token], px: f32, width: f32) -> Vec<Span> {
     let mut rows = Vec::new();
     let mut open: Option<(usize, f32)> = None;
     for token in tokens {
@@ -306,7 +248,7 @@ fn wrap_tokens(text: &str, shaped: &Shaped, tokens: &[Token], px: f32, width: f3
             }
             let piece = text.get(token.start..token.end).unwrap_or_default();
             rows.extend(
-                text::wrap(piece, px, font, width)
+                text::wrap(piece, px, SEMIBOLD, width)
                     .into_iter()
                     .map(|row| Span { start: token.start + row.start, end: token.start + row.end }),
             );
@@ -335,97 +277,70 @@ fn readable(text: &str) -> bool {
     text.chars().any(char::is_alphanumeric)
 }
 
-pub(super) fn measure(line: &Line, ctx: &Ctx<'_>) -> Measured {
+fn measure(line: &Line, active: bool, ctx: &Ctx<'_>) -> Measured {
     let px = ctx.lyric_px;
-    let shaped = text::shape(&line.text, px, ctx.typography.font(SEMIBOLD));
+    let shaped = text::shape(&line.text, px, SEMIBOLD);
     if shaped.missing > 0 {
         tracing::warn!(missing = shaped.missing, "monet lyric has glyphs no font covers");
     }
     let tokens = tokens(line);
-    let rows = wrap_tokens(&line.text, &shaped, &tokens, px, ctx.width, ctx.typography.font(SEMIBOLD));
+    let rows = wrap_tokens(&line.text, &shaped, &tokens, px, ctx.width);
+    let limit = if active { ACTIVE_ROWS } else { INACTIVE_ROWS };
+    let visible = rows.len().min(limit);
     let line_height = px * 1.18;
     let pad_top = (px * 0.16).max(8.0);
     let pad_bottom = (px * 0.34).max(14.0);
-    let track =
-        ctx.typography.subtitle_mode.single(line).filter(|text| !ctx.typography.hide_subtitle && readable(text)).map(
-            |translation| {
-                let px = ctx.translation_px * ctx.typography.subtitle_scale;
-                let rows: Vec<Span> = text::wrap(
-                    translation,
-                    px,
-                    ctx.typography.subtitle.unwrap_or_else(|| ctx.typography.font(MEDIUM)),
-                    ctx.width,
-                )
-                .into_iter()
-                .map(|row| Span { start: row.start, end: row.end })
-                .collect();
-                let shown = rows.len().clamp(1, TRACK_ROWS);
-                let line_height = px * 1.28;
-                let pad_top = (px * 0.45).max(7.0);
-                let height = shown as f32 * line_height + pad_top + (px * 0.18).max(5.0);
-                Track {
-                    text: translation.to_owned(),
-                    clipped: rows.len() > shown,
-                    rows: rows.into_iter().take(shown).collect(),
-                    px,
-                    line_height,
-                    pad_top,
-                    height,
-                }
-            },
-        );
+    let text_height = visible as f32 * line_height + pad_top + pad_bottom;
+    // `subtitleContentMode` resolves to 'translation': Folia-rust has no romanization switch yet.
+    let track = line.translation.as_deref().filter(|text| active && readable(text)).map(|translation| {
+        let px = ctx.translation_px;
+        let rows: Vec<Span> = text::wrap(translation, px, MEDIUM, ctx.width)
+            .into_iter()
+            .map(|row| Span { start: row.start, end: row.end })
+            .collect();
+        let shown = rows.len().clamp(1, TRACK_ROWS);
+        let line_height = px * 1.28;
+        let pad_top = (px * 0.45).max(7.0);
+        let height = shown as f32 * line_height + pad_top + (px * 0.18).max(5.0);
+        Track {
+            text: translation.to_owned(),
+            clipped: rows.len() > shown,
+            rows: rows.into_iter().take(shown).collect(),
+            px,
+            line_height,
+            pad_top,
+            height,
+        }
+    });
+    let height = text_height + track.as_ref().map_or(0.0, |track| track.height);
+    let ink = text::ink(&shaped);
     Measured {
-        timeline: super::long_note::Timeline::new(&line.text, &rows, &tokens, !line.words.is_empty()),
-        keywords: if ctx.keywords {
-            crate::monet_appearance::word_color_ranges(&line.text, &ctx.theme.word_colors)
-        } else {
-            Vec::new()
-        },
         shaped,
-        ink: Default::default(),
+        ink,
         tokens,
+        clipped: rows.len() > visible,
         rows,
+        visible,
         line_height,
         pad_top,
-        pad_bottom,
+        text_height,
         track,
+        height,
     }
 }
 
 impl Rail {
-    pub(super) fn needs_frame(&self, now: Instant) -> bool {
-        self.preparation.get().and_then(Option::as_ref).is_some_and(|prep| prep.busy())
-            || settling(self, now)
-            || self.scroll.released.is_some()
-            || release_due(self).is_some_and(|at| now >= at)
-    }
-
-    pub(super) fn measure_key(ctx: &Ctx<'_>, index: usize) -> u64 {
+    fn measured(&mut self, ctx: &Ctx<'_>, index: usize, active: bool) -> Rc<Measured> {
         let line = &ctx.lines[index];
         let mut hasher = DefaultHasher::new();
-        ctx.typography.fingerprint().hash(&mut hasher);
-        (&ctx.theme.word_colors, ctx.keywords).hash(&mut hasher);
-        (
-            ctx.lines.as_ptr(),
-            line.words.as_ptr(),
-            index,
-            line.start.to_bits(),
-            line.end.to_bits(),
-            &line.text,
-            &line.translation,
-            &line.romanization,
-        )
-            .hash(&mut hasher);
+        (index, line.start.to_bits(), line.end.to_bits(), &line.text, &line.translation, active).hash(&mut hasher);
         (ctx.lyric_px.to_bits(), ctx.translation_px.to_bits(), ctx.width.to_bits()).hash(&mut hasher);
-        hasher.finish()
-    }
-    fn measured(&mut self, ctx: &Ctx<'_>, index: usize) -> Arc<Measured> {
-        let key = Self::measure_key(ctx, index);
+        let key = hasher.finish();
         if let Some((_, measured)) = self.measured.iter().find(|(held, _)| *held == key) {
             return measured.clone();
         }
-        let measured = Arc::new(measure(&ctx.lines[index], ctx));
-        if self.measured.len() >= 32 {
+        let measured = Rc::new(measure(line, active, ctx));
+        if self.measured.len() >= 24 {
             self.measured.remove(0);
         }
         self.measured.push((key, measured.clone()));
@@ -438,14 +353,12 @@ impl Rail {
             .iter()
             .map(|entry| {
                 let (opacity, scale, blur, base, z) = tone(*entry, ctx.inactive_scale);
-                let height = self.measured(ctx, entry.index).height(entry.status == Status::Active) * scale;
+                let height = self.measured(ctx, entry.index, entry.status == Status::Active).height * scale;
                 let visual = Visual {
                     index: entry.index,
                     offset: entry.offset,
                     status: entry.status,
                     y: 0.0,
-                    velocity: 0.,
-                    scale_velocity: 0.,
                     scale,
                     opacity,
                     blur,
@@ -483,89 +396,36 @@ impl Rail {
     fn last_change(&mut self, lines: &[Line], time: f64) -> Option<f64> {
         let key = (lines.as_ptr() as usize, lines.len());
         if (self.events.0, self.events.1) != key {
-            let mut events: Vec<f64> = lines
-                .iter()
-                .flat_map(|line| [line.start, line.end.next_up(), RenderHints::of(line).render_end.next_up()])
-                .collect();
+            let mut events: Vec<f64> =
+                lines.iter().flat_map(|line| [line.start, line.end, RenderHints::of(line).render_end]).collect();
             events.sort_by(f64::total_cmp);
             events.dedup();
             self.events = (key.0, key.1, events);
-            self.changes.clear();
-            self.history = None;
         }
-        let below = self.events.2.partition_point(|event| *event <= time);
-        if let Some((_, time)) = self.changes.iter().find(|(end, _)| *end == below) {
-            return *time;
-        }
-        let mut changed = None;
-        for i in (0..below).rev() {
-            let at = self.events.2[i];
-            if auto_entries(lines, at.next_down()) != auto_entries(lines, at) {
-                changed = Some(at);
-                break;
-            }
-            if let Some((_, previous)) = self.changes.iter().find(|(end, _)| *end == i) {
-                changed = *previous;
-                break;
-            }
-        }
-        if self.changes.len() >= 8 {
-            self.changes.remove(0);
-        }
-        self.changes.push((below, changed));
-        changed
+        let below = self.events.2.partition_point(|event| *event < time);
+        self.events.2[..below]
+            .iter()
+            .rev()
+            .take(24)
+            .copied()
+            .find(|event| auto_entries(lines, event - 1.0e-4) != auto_entries(lines, event + 1.0e-4))
     }
 
     /// Lines at `time` following the playing position, each mid-way through its spring from the previous window.
     fn visuals(&mut self, ctx: &Ctx<'_>, time: f64, depth: u32) -> Vec<Visual> {
-        let target = |rail: &mut Self| rail.targets(ctx, &auto_entries(ctx.lines, time));
+        let entries = auto_entries(ctx.lines, time);
+        let target = self.targets(ctx, &entries);
         if depth == 0 {
-            return target(self);
+            return target;
         }
-        let change = self.last_change(ctx.lines, time);
-        // The previous window is sampled at the same timestamp throughout this transition.
-        if depth == 3 {
-            let mut hash = DefaultHasher::new();
-            (
-                ctx.lines.as_ptr() as usize,
-                ctx.lines.len(),
-                change.map(f64::to_bits),
-                ctx.typography.fingerprint(),
-                ctx.keywords,
-                &ctx.theme.word_colors,
-            )
-                .hash(&mut hash);
-            [ctx.width, ctx.height, ctx.lyric_px, ctx.translation_px, ctx.inactive_scale]
-                .map(f32::to_bits)
-                .hash(&mut hash);
-            let key = hash.finish();
-            if let Some((held, before, target)) = &self.history
-                && *held == key
-            {
-                return change.map_or_else(|| target.clone(), |at| blend(before, target, time - at));
-            }
-            let target = target(self);
-            let before = change.map_or_else(Vec::new, |at| self.visuals(ctx, at.next_down(), depth - 1));
-            let blended = change.map_or_else(|| target.clone(), |at| blend(&before, &target, time - at));
-            self.history = Some((key, before, target));
-            return blended;
-        }
-        let target = target(self);
-        let Some(change) = change else { return target };
-        let before = self.visuals(ctx, change.next_down(), depth - 1);
+        let Some(change) = self.last_change(ctx.lines, time) else { return target };
+        let before = self.visuals(ctx, change - 1.0e-4, depth - 1);
         blend(&before, &target, time - change)
     }
 }
 
 /// `MONET_SCROLL_TRANSITION` from the previous window into `target`, plus the enter and exit motions.
 fn blend(before: &[Visual], target: &[Visual], elapsed: f64) -> Vec<Visual> {
-    if elapsed >= 2.5 {
-        return target.to_vec();
-    }
-    let position = motion::Spring::scroll(elapsed);
-    let size = motion::Spring::scale(elapsed);
-    let opacity = tween(0., 1., elapsed, 0.28, SWAP) as f32;
-    let blur = tween(0., 1., elapsed, 0.32, SWAP) as f32;
     let mut out: Vec<Visual> = target
         .iter()
         .map(|to| {
@@ -576,15 +436,25 @@ fn blend(before: &[Visual], target: &[Visual], elapsed: f64) -> Vec<Visual> {
                 blur: 5.0,
                 ..*to
             });
-            let (y, velocity) = position.apply(from.y, to.y, from.velocity);
-            let (scale, scale_velocity) = size.apply(from.scale, to.scale, from.scale_velocity);
             Visual {
-                y,
-                velocity,
-                scale,
-                scale_velocity,
-                opacity: from.opacity + (to.opacity - from.opacity) * opacity,
-                blur: from.blur + (to.blur - from.blur) * blur,
+                y: motion::spring(
+                    from.y.into(),
+                    to.y.into(),
+                    elapsed,
+                    motion::SCROLL_STIFFNESS,
+                    motion::SCROLL_DAMPING,
+                    motion::SCROLL_MASS,
+                ) as f32,
+                scale: motion::spring(
+                    from.scale.into(),
+                    to.scale.into(),
+                    elapsed,
+                    motion::SCALE_STIFFNESS,
+                    motion::SCALE_DAMPING,
+                    motion::SCALE_MASS,
+                ) as f32,
+                opacity: tween(from.opacity.into(), to.opacity.into(), elapsed, 0.28, SWAP) as f32,
+                blur: tween(from.blur.into(), to.blur.into(), elapsed, 0.32, SWAP) as f32,
                 ..*to
             }
         })
@@ -605,7 +475,7 @@ fn blend(before: &[Visual], target: &[Visual], elapsed: f64) -> Vec<Visual> {
     out
 }
 
-/// One wheel event over the rail (`handleRailWheel`): 72px of travel per line, including coalesced input.
+/// One wheel event over the rail (`handleRailWheel`): 72px of travel per line, one line per event at most.
 pub fn wheel(rail: &mut Rail, scene: &Scene<'_>, lines_down: f32, pixels_down: f32, now: Instant) -> bool {
     let lines = &scene.lyrics.lines;
     if lines.is_empty() {
@@ -623,9 +493,9 @@ pub fn wheel(rail: &mut Rail, scene: &Scene<'_>, lines_down: f32, pixels_down: f
     }
     scroll.wheel += delta;
     scroll.input = Some(now);
-    let steps = (scroll.wheel / SCROLL_STEP).trunc() as i64;
+    let steps = (scroll.wheel / SCROLL_STEP).trunc().clamp(-1.0, 1.0) as i64;
     if steps != 0 {
-        scroll.wheel %= SCROLL_STEP;
+        scroll.wheel = 0.0;
         let fallback = || {
             active_line(lines, scene.time)
                 .or_else(|| {
@@ -634,12 +504,8 @@ pub fn wheel(rail: &mut Rail, scene: &Scene<'_>, lines_down: f32, pixels_down: f
                 .unwrap_or(0)
         };
         let base = scroll.anchor.unwrap_or_else(fallback);
-        let next = (base as i64).saturating_add(steps).clamp(0, lines.len() as i64 - 1) as usize;
-        if scroll.anchor == Some(next) {
-            return true;
-        }
-        scroll.stepped = true;
-        scroll.origin.clone_from(&rail.presented);
+        let next = (base as i64 + steps).clamp(0, lines.len() as i64 - 1) as usize;
+        scroll.from = scroll.anchor;
         scroll.anchor = Some(next);
         scroll.moved = Some(now);
         scroll.released = None;
@@ -655,19 +521,14 @@ pub fn release_due(rail: &Rail) -> Option<Instant> {
 /// Lets the held anchor go once the wheel has been idle for 1.8s (`MONET_SCROLL_IDLE_RESET_MS`).
 fn release(rail: &mut Rail, now: Instant) {
     let scroll = &mut rail.scroll;
-    if let (Some(_), Some(input)) = (scroll.anchor, scroll.input)
+    if let (Some(anchor), Some(input)) = (scroll.anchor, scroll.input)
         && now >= input + IDLE_RESET
     {
-        scroll.released = Some(input + IDLE_RESET);
-        scroll.origin.clone_from(&rail.presented);
+        scroll.released = Some((anchor, input + IDLE_RESET));
         scroll.anchor = None;
-        scroll.moved = None;
+        scroll.from = None;
         scroll.wheel = 0.0;
         scroll.direction = 0.0;
-    }
-    if scroll.released.is_some_and(|at| now >= at + SETTLE) {
-        scroll.released = None;
-        scroll.origin.clear();
     }
 }
 
@@ -675,57 +536,46 @@ fn release(rail: &mut Rail, now: Instant) {
 pub fn settling(rail: &Rail, now: Instant) -> bool {
     let scroll = &rail.scroll;
     scroll.anchor.is_some() && scroll.moved.is_some_and(|at| now < at + SETTLE)
-        || scroll.released.is_some_and(|at| now < at + SETTLE)
+        || scroll.released.is_some_and(|(_, at)| now < at + SETTLE)
 }
 
 /// The rail at `scene.time`, faded by the intro (`alpha`, `dy`).
-pub fn draw(
-    frame: &mut Frame,
-    place: Place,
-    scene: &Scene<'_>,
-    layout: &Layout,
-    rail: &mut Rail,
-    gpu: Option<&RefCell<Rows>>,
-    alpha: f32,
-    dy: f32,
-) {
+pub fn draw(frame: &mut Frame, place: Place, scene: &Scene<'_>, layout: &Layout, rail: &mut Rail, alpha: f32, dy: f32) {
     let lines = &scene.lyrics.lines;
     if lines.is_empty() || alpha <= 0.0 {
         rail.hits.clear();
         return;
     }
     let ctx = Ctx::new(scene, layout);
-    if let Some(rows) = gpu {
-        rows.borrow_mut().defer_upload = std::mem::take(&mut rail.scroll.stepped);
-        rail.preparation.get_or_init(super::preparation::Preparation::new);
-        if let Some(Some(prep)) = rail.preparation.get_mut() {
-            let index = rail
-                .scroll
-                .anchor
-                .unwrap_or_else(|| lines.partition_point(|line| line.start <= scene.time).saturating_sub(1));
-            let direction = rail.scroll.anchor.map(|_| if rail.scroll.direction < 0. { -1 } else { 1 });
-            prep.update(&ctx, index, direction, &mut rows.borrow_mut(), &mut rail.measured);
-        }
-    }
     let held = rail.scroll.anchor.is_some() || rail.scroll.released.is_some();
     let now = held.then(Instant::now);
     if let Some(now) = now {
         release(rail, now);
     }
+    let active = active_line(lines, scene.time);
     let manual = rail.scroll.anchor;
-    let target = if let Some(anchor) = manual {
-        rail.targets(&ctx, &manual_entries(lines, anchor, active_line(lines, scene.time)))
-    } else {
-        rail.visuals(&ctx, scene.time, 3)
-    };
-    let start = if manual.is_some() { rail.scroll.moved } else { rail.scroll.released };
-    let mut visuals = match start.zip(now) {
-        Some((at, now)) if now < at + SETTLE && !rail.scroll.origin.is_empty() => {
-            follow(&rail.scroll.origin, target, now.saturating_duration_since(at).as_secs_f64())
+    let mut visuals = match manual {
+        Some(anchor) => {
+            let target = rail.targets(&ctx, &manual_entries(lines, anchor, active));
+            let from = match rail.scroll.from {
+                Some(from) => rail.targets(&ctx, &manual_entries(lines, from, active)),
+                None => rail.visuals(&ctx, scene.time, 3),
+            };
+            let elapsed =
+                rail.scroll.moved.zip(now).map_or(10.0, |(at, now)| now.saturating_duration_since(at).as_secs_f64());
+            follow(&from, target, elapsed)
         }
-        _ => target,
+        None => {
+            let target = rail.visuals(&ctx, scene.time, 3);
+            match rail.scroll.released.zip(now) {
+                Some(((anchor, at), now)) => {
+                    let from = rail.targets(&ctx, &manual_entries(lines, anchor, active));
+                    follow(&from, target, now.saturating_duration_since(at).as_secs_f64())
+                }
+                None => target,
+            }
+        }
     };
-    rail.presented.clone_from(&visuals);
     visuals.sort_by_key(|visual| visual.z);
     let box_ = Rectangle { y: layout.rail.y + dy, ..layout.rail };
     let fade = move |y: f32| {
@@ -740,18 +590,12 @@ pub fn draw(
             (1.0 - at) / 0.12
         }
     };
-    let paint =
-        Paint { gpu, place, scene, layout, ctx: &ctx, rail: box_, fade: &fade, alpha, manual: manual.is_some() };
+    let paint = Paint { place, scene, layout, ctx: &ctx, rail: box_, fade: &fade, alpha, manual: manual.is_some() };
     rail.hits.clear();
     for visual in &visuals {
-        let measured = rail.measured(&ctx, visual.index);
+        let measured = rail.measured(&ctx, visual.index, visual.status == Status::Active);
         let hit = clip_to(
-            Rectangle {
-                x: box_.x,
-                y: box_.y + visual.y,
-                width: box_.width,
-                height: measured.height(visual.status == Status::Active) * visual.scale,
-            },
+            Rectangle { x: box_.x, y: box_.y + visual.y, width: box_.width, height: measured.height * visual.scale },
             box_,
         );
         if hit.height > 0.0 {
@@ -763,16 +607,21 @@ pub fn draw(
 
 /// Springs the lines shared with `from` from their old place; new lines appear in place (`disableEntryMotion`).
 fn follow(from: &[Visual], target: Vec<Visual>, elapsed: f64) -> Vec<Visual> {
-    let position = motion::Spring::scroll(elapsed);
-    let size = motion::Spring::scale(elapsed);
     target
         .into_iter()
-        .map(|mut to| {
-            if let Some(from) = from.iter().find(|v| v.index == to.index) {
-                (to.y, to.velocity) = position.apply(from.y, to.y, from.velocity);
-                (to.scale, to.scale_velocity) = size.apply(from.scale, to.scale, from.scale_velocity);
-            }
-            to
+        .map(|to| match from.iter().find(|from| from.index == to.index) {
+            Some(from) => Visual {
+                y: motion::spring(
+                    from.y.into(),
+                    to.y.into(),
+                    elapsed,
+                    motion::SCROLL_STIFFNESS,
+                    motion::SCROLL_DAMPING,
+                    motion::SCROLL_MASS,
+                ) as f32,
+                ..to
+            },
+            None => to,
         })
         .collect()
 }
@@ -780,7 +629,6 @@ fn follow(from: &[Visual], target: Vec<Visual>, elapsed: f64) -> Vec<Visual> {
 /// One row of a line as drawn: its pen, where its bytes sit, the clip band and the colours.
 #[derive(Clone, Copy)]
 struct RowInk<'a> {
-    gpu: Option<&'a InkRow<'a>>,
     pen: ink::Line<'a>,
     measured: &'a Measured,
     span: Span,
@@ -789,14 +637,6 @@ struct RowInk<'a> {
     base: Color,
     word: Color,
     opacity: f32,
-}
-
-fn keyword_ink(measured: &Measured, token: &Token, fallback: Color) -> Color {
-    measured
-        .keywords
-        .iter()
-        .find(|entry| entry.range.start < token.end && token.start < entry.range.end)
-        .map_or(fallback, |entry| color(entry.color, fallback.a))
 }
 
 /// A line placed on the rail this frame.
@@ -810,7 +650,6 @@ struct Placed<'a> {
 }
 
 struct Paint<'a> {
-    gpu: Option<&'a RefCell<Rows>>,
     place: Place,
     scene: &'a Scene<'a>,
     layout: &'a Layout,
@@ -824,11 +663,8 @@ struct Paint<'a> {
 impl Paint<'_> {
     fn line(&self, frame: &mut Frame, visual: &Visual, measured: &Measured) {
         let Some(line) = self.ctx.lines.get(visual.index) else { return };
-        let scale = if self.gpu.is_some() { visual.scale } else { snap_scale(self.ctx.lyric_px, visual.scale) };
+        let scale = snap_scale(self.ctx.lyric_px, visual.scale);
         let opacity = visual.opacity * self.alpha;
-        if opacity <= 0. {
-            return;
-        }
         if opacity <= 0.002 {
             return;
         }
@@ -839,7 +675,7 @@ impl Paint<'_> {
         let active = visual.status == Status::Active;
         let placed = Placed { line, visual, origin, scale, opacity };
         if line.is_chorus {
-            self.chorus(frame, &placed, width, measured.height(active) * scale);
+            self.chorus(frame, &placed, width, measured.height * scale);
         }
         let mut word = color(theme.primary, 0.98);
         if line.is_chorus {
@@ -848,10 +684,9 @@ impl Paint<'_> {
         let base = color(theme.primary, visual.base);
         let line_height = measured.line_height * scale;
         let px = self.ctx.lyric_px * scale;
-        let content_bottom =
-            origin.y + (measured.pad_top + measured.visible(active) as f32 * measured.line_height) * scale;
+        let content_bottom = origin.y + (measured.pad_top + measured.visible as f32 * measured.line_height) * scale;
         let fade_px = (self.ctx.lyric_px * 0.55).max(12.0) * scale;
-        let clipped = !active && measured.visible(false) < measured.rows.len();
+        let clipped = !active && measured.clipped;
         let rail_fade = self.fade;
         let mask = move |y: f32| {
             let cut = if clipped { ((content_bottom - y) / fade_px).clamp(0.0, 1.0) } else { 1.0 };
@@ -862,125 +697,48 @@ impl Paint<'_> {
             x: origin.x - bleed,
             y: origin.y - bleed,
             width: width + bleed * 2.0,
-            height: if active { f32::INFINITY } else { measured.text_height(active) * scale + bleed * 2.0 },
+            height: if active { f32::INFINITY } else { measured.text_height * scale + bleed * 2.0 },
         };
         let block = clip_to(block, self.rail);
         let render_end = RenderHints::of(line).render_end;
         let still = self.manual && !active;
-        for (row_index, row) in measured.rows.iter().take(measured.visible(active)).enumerate() {
+        for (row_index, row) in measured.rows.iter().take(measured.visible).enumerate() {
             let content = line.text.get(row.start..row.end).unwrap_or_default();
             let at =
                 Point::new(origin.x, origin.y + (measured.pad_top + row_index as f32 * measured.line_height) * scale);
-            let pen = ink::Line { content, at, px, line_height, font: self.scene.monet.typography.font(SEMIBOLD) };
+            let pen = ink::Line { content, at, px, line_height, font: SEMIBOLD };
             let band = clip_to(
                 Rectangle { x: block.x, y: at.y - line_height * 0.3, width: block.width, height: line_height * 1.6 },
                 block,
             );
-            if band.width <= 0. || band.height <= 0. {
-                continue;
-            }
-            let mut gpu = InkRow::new(
-                self.gpu,
-                pen,
-                self.ctx.lyric_px,
-                measured.line_height,
-                self.rail,
-                clipped.then_some((content_bottom, fade_px)),
-            );
             let row_x = measured.shaped.x_at(row.start);
             let to_x = |byte: usize| origin.x + (measured.shaped.x_at(byte) - row_x) * scale;
-            if !still && let Some(gpu) = gpu.as_mut() {
-                let ms = (self.scene.time * 1000.).floor() as i64;
-                for held in
-                    measured.timeline.holds.iter().filter(|h| h.bytes.start >= row.start && h.bytes.end <= row.end)
-                {
-                    if ms >= held.start + held.gap + 580 || (visual.status == Status::Waiting && ms < held.start - 600)
-                    {
-                        continue;
-                    }
-                    let left = to_x(held.bytes.start);
-                    let right = to_x(held.bytes.end);
-                    if right <= left {
-                        continue;
-                    }
-                    let letters = &measured.timeline.letters;
-                    let next = letters.partition_point(|l| l.start <= ms);
-                    let feather = (self.ctx.lyric_px * 0.82).max(1.) * scale;
-                    let front = match next.checked_sub(1).and_then(|i| letters.get(i)) {
-                        Some(l) if l.byte >= held.bytes.end => right + feather,
-                        Some(l) if l.byte >= held.bytes.start => {
-                            let end = l.byte + line.text[l.byte..].chars().next().map_or(0, char::len_utf8);
-                            let p = ((ms - l.start) as f32 / (l.end - l.start).max(1) as f32).clamp(0., 1.);
-                            to_x(l.byte) + (to_x(end) - to_x(l.byte)) * p
-                        }
-                        _ => left - feather,
-                    };
-                    let room = measured.pad_top * scale + line_height * 0.5
-                        - px * 0.6
-                        - 2. * (0.57735 * 8.8 * scale + 0.5 / gpu.density())
-                        - 1.2;
-                    let revealed = measured
-                        .keywords
-                        .iter()
-                        .find(|k| k.range.start < held.bytes.end && held.bytes.start < k.range.end)
-                        .map_or(word, |k| color(k.color, word.a));
-                    gpu.held(
-                        left,
-                        right,
-                        scale,
-                        held.offset(ms, room) * scale,
-                        held.strength(ms),
-                        held.gap > 900 && ms >= held.start - 600,
-                        visual.status == Status::Waiting,
-                        front,
-                        feather,
-                        Color { a: opacity * base.a, ..base },
-                        Color { a: opacity * revealed.a, ..revealed },
-                        self.rail,
-                    );
-                }
-            }
-            let ink_row =
-                RowInk { gpu: gpu.as_ref(), pen, measured, span: *row, to_x: &to_x, band, base, word, opacity };
+            let ink_row = RowInk { pen, measured, span: *row, to_x: &to_x, band, base, word, opacity };
             if active {
-                let tint = color(theme.background, ink::split_alpha(0.22 * opacity, 13));
-                if let Some(gpu) = &gpu {
-                    gpu.ink(band, tint, 17. * scale, 14. * scale);
-                } else {
-                    let shadow = ink::blur_offsets(17. * scale, (0., 14. * scale));
-                    ink::masked_copies(frame, self.place, pen, tint, band, &mask, &shadow);
-                }
+                let shadow = ink::blur_offsets(17.0 * scale, (0.0, 14.0 * scale));
+                let tint = color(theme.background, ink::split_alpha(0.22 * opacity, shadow.len()));
+                ink::masked_copies(frame, self.place, pen, tint, band, &mask, &shadow);
             }
-            if self.gpu.is_none() && !still && visual.status != Status::Waiting {
+            if !still && visual.status != Status::Waiting {
                 self.glow(frame, &ink_row, line.is_chorus, render_end);
             }
             let segments = self.segments(&ink_row, visual.status, still);
-            let blur = if visual.blur * scale >= 0.6 { visual.blur * scale } else { 0. };
-            let offsets = (gpu.is_none() && blur > 0.).then(|| ink::blur_offsets(blur, (0., 0.)));
+            let offsets = if visual.blur * scale >= 0.6 {
+                ink::blur_offsets(visual.blur * scale, (0.0, 0.0))
+            } else {
+                vec![(0.0, 0.0)]
+            };
             for (x0, x1, ink_color) in segments {
-                let tint =
-                    Color { a: ink::split_alpha(ink_color.a * opacity, if blur > 0. { 13 } else { 1 }), ..ink_color };
+                let tint = Color { a: ink::split_alpha(ink_color.a * opacity, offsets.len()), ..ink_color };
                 let clip = Rectangle { x: x0, width: (x1 - x0).max(0.0), ..band };
-                if let Some(gpu) = &gpu {
-                    gpu.ink(clip, tint, blur, 0.);
-                } else {
-                    ink::masked_copies(
-                        frame,
-                        self.place,
-                        pen,
-                        tint,
-                        clip,
-                        &mask,
-                        offsets.as_deref().unwrap_or(&[(0., 0.)]),
-                    );
-                }
+                ink::masked_copies(frame, self.place, pen, tint, clip, &mask, &offsets);
             }
             if active && !self.manual {
                 self.sweep(frame, &ink_row, &mask);
             }
         }
-        if active && let Some(track) = &measured.track {
-            self.track(frame, &placed, track, measured.text_height(active) * scale);
+        if let Some(track) = &measured.track {
+            self.track(frame, &placed, track, measured.text_height * scale);
         }
     }
 
@@ -990,7 +748,6 @@ impl Paint<'_> {
         let time = self.scene.time;
         let mut runs: Vec<(f32, f32, Color)> = Vec::new();
         for token in measured.tokens.iter().filter(|token| token.end > row.start && token.start < row.end) {
-            let word = keyword_ink(measured, token, word);
             let tint = match (token.timing, status) {
                 (Some(_), _) if still => word,
                 (Some(_), Status::Passed) => word,
@@ -1022,7 +779,6 @@ impl Paint<'_> {
         let tint = Color { a: if chorus { 1.0 } else { 0.88 }, ..word };
         for token in measured.tokens.iter().filter(|token| token.end > row.start && token.start < row.end) {
             let Some((start, end)) = token.timing else { continue };
-            let tint = keyword_ink(measured, token, tint);
             let lit = motion::glow(time, start, end, render_end) * opacity;
             if lit <= 0.01 {
                 continue;
@@ -1032,7 +788,7 @@ impl Paint<'_> {
                 .shaped
                 .glyphs
                 .iter()
-                .zip(measured.ink.get_or_init(|| text::ink(&measured.shaped)))
+                .zip(&measured.ink)
                 .filter(|(glyph, _)| glyph.start >= from && glyph.start < to)
                 .fold((f32::INFINITY, f32::NEG_INFINITY), |(top, bottom), (_, ink)| {
                     (top.min(ink.0), bottom.max(ink.1))
@@ -1049,20 +805,18 @@ impl Paint<'_> {
                 let radius = (self.ctx.lyric_px * reach).round() * scale;
                 let halo = Color { a: tint.a * lit * GLYPH_INK * fade, ..tint };
                 // Meshes cannot go through `Place::clip`: a draft's meshes land under the root frame's.
-                let corner = (pen.px * 0.12).min(ink_box.height / 2.);
-                ink::box_shadow(frame, ink_box, corner, 0., radius, halo);
+                ink::box_shadow(frame, ink_box, (pen.px * 0.12).min(ink_box.height / 2.0), 0.0, radius, halo);
             }
         }
     }
 
     /// The fill sweeping across the word being sung, with its soft front edge (`MonetWordSweep`).
     fn sweep(&self, frame: &mut Frame, ink_row: &RowInk<'_>, mask: Mask<'_>) {
-        let RowInk { pen, measured, span: row, to_x, band, base, word, opacity, .. } = *ink_row;
+        let RowInk { pen, measured, span: row, to_x, band, base, word, opacity } = *ink_row;
         let time = self.scene.time;
         let scale = pen.px / self.ctx.lyric_px.max(1.0);
         for token in measured.tokens.iter().filter(|token| token.end > row.start && token.start < row.end) {
             let Some((start, end)) = token.timing else { continue };
-            let word = keyword_ink(measured, token, word);
             if time <= start || time >= end {
                 continue;
             }
@@ -1112,12 +866,7 @@ impl Paint<'_> {
                     },
                 );
                 let alpha = tint.a * opacity * strength * gradient((from + to) / 2.0);
-                let color = Color { a: alpha, ..tint };
-                if let Some(gpu) = ink_row.gpu {
-                    gpu.ink(clip, color, 0., 0.);
-                } else {
-                    ink::masked(frame, self.place, pen, color, clip, mask);
-                }
+                ink::masked(frame, self.place, pen, Color { a: alpha, ..tint }, clip, mask);
             }
         }
     }
@@ -1152,20 +901,9 @@ impl Paint<'_> {
         for (index, row) in track.rows.iter().enumerate() {
             let content = track.text.get(row.start..row.end).unwrap_or_default();
             let at = Point::new(origin.x, box_top + (track.pad_top + index as f32 * track.line_height) * scale);
-            let pen = ink::Line {
-                content,
-                at,
-                px: track.px * scale,
-                line_height: track.line_height * scale,
-                font: self.scene.monet.typography.subtitle.unwrap_or_else(|| self.scene.monet.typography.font(MEDIUM)),
-            };
-            if let Some(gpu) =
-                InkRow::new(self.gpu, pen, track.px, track.line_height, self.rail, clipped.then_some((bottom, fade_px)))
-            {
-                gpu.ink(region, tint, 0., 0.);
-            } else {
-                ink::masked(frame, self.place, pen, tint, region, &mask);
-            }
+            let pen =
+                ink::Line { content, at, px: track.px * scale, line_height: track.line_height * scale, font: MEDIUM };
+            ink::masked(frame, self.place, pen, tint, region, &mask);
         }
     }
 
@@ -1188,14 +926,7 @@ impl Paint<'_> {
         let (w, h) = (width * grow, (height + reach * 2.0) * grow);
         let rect = Rectangle { x: center.x - w / 2.0, y: center.y - h / 2.0, width: w, height: h };
         let tint = color(self.scene.theme.accent, shown * opacity * (self.fade)(center.y));
-        if let Some(rows) = self.gpu
-            && self.layout.portrait.is_none()
-            && self.scene.tuning.choice(super::manifest(), "audioStyle") != "line"
-        {
-            rows.borrow_mut().chorus(rect, tint, &CHORUS);
-        } else {
-            ink::radial(frame, rect, tint, &CHORUS);
-        }
+        ink::radial(frame, rect, tint, &CHORUS);
     }
 }
 
@@ -1239,13 +970,13 @@ pub fn boxes(scene: &Scene<'_>, layout: &Layout) -> Vec<(usize, Rectangle)> {
     visuals
         .iter()
         .filter_map(|visual| {
-            let measured = rail.measured(&ctx, visual.index);
+            let measured = rail.measured(&ctx, visual.index, visual.status == Status::Active);
             let hit = clip_to(
                 Rectangle {
                     x: layout.rail.x,
                     y: layout.rail.y + visual.y,
                     width: layout.rail.width,
-                    height: measured.height(visual.status == Status::Active) * visual.scale,
+                    height: measured.height * visual.scale,
                 },
                 layout.rail,
             );
@@ -1257,7 +988,7 @@ pub fn boxes(scene: &Scene<'_>, layout: &Layout) -> Vec<(usize, Rectangle)> {
 /// Drops a held manual anchor, so the rail returns to the playing position (`setManualScrollAnchorIndex(null)`).
 pub fn end_manual(rail: &mut Rail) {
     rail.scroll.anchor = None;
-    rail.scroll.origin.clear();
+    rail.scroll.from = None;
     rail.scroll.released = None;
     rail.scroll.wheel = 0.0;
     rail.scroll.direction = 0.0;

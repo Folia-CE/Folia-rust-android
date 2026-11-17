@@ -2,7 +2,6 @@ package io.github.techuouo520.folia.spatial
 
 import android.graphics.Paint
 import android.graphics.Path as AndroidPath
-import io.github.techuouo520.folia.avoidPlayer
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -28,7 +27,6 @@ internal fun SpatialActionTile(action: Int,label: String,collection: Boolean,fav
     material: Color,enabled: Boolean,modifier: Modifier,onClick: ()->Unit) {
     val ink=if(action==2&&favorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
     val icon=painterResource(when(action) {
-        4->R.drawable.spatial_lyrics
         1->R.drawable.spatial_rfg_bubble_icon_queue_next
         2->if(favorite) R.drawable.spatial_rfg_bubble_icon_star_filled else R.drawable.spatial_rfg_bubble_icon_star
         else->R.drawable.spatial_rfg_bubble_icon_play
@@ -41,17 +39,16 @@ internal fun SpatialActionTile(action: Int,label: String,collection: Boolean,fav
     val dislike=remember {dislikeHeart()}
     val glyphPaint=remember {Paint(Paint.ANTI_ALIAS_FLAG)}
     val slashPaint=remember {Paint(Paint.ANTI_ALIAS_FLAG).apply {strokeCap=Paint.Cap.ROUND;strokeWidth=24*.085f}}
-    Canvas(modifier.avoidPlayer().semantics {contentDescription=label;selected=action==2&&favorite}
+    Canvas(modifier.semantics {contentDescription=label;selected=action==2&&favorite}
         .clickable(interactionSource=remember {MutableInteractionSource()},indication=null,enabled=enabled,role=Role.Button,onClick=onClick)) {
         drawRoundRect(material,cornerRadius=CornerRadius(6.dp.toPx()))
         val cx=size.width/2;val cy=size.height/2
         text.color=ink.toArgb()
         val edge=24.dp.toPx()
-        if(action==3 || action==4) {
+        if(action==3) {
             val textWidth=text.measureText(label)
             val left=cx-(34.dp.toPx()+textWidth)/2
-            if (action==4) translate(left,cy-edge/2) { with(icon) { draw(Size(edge,edge),colorFilter=ColorFilter.tint(ink)) } }
-            else translate(left,cy-edge/2) {scale(edge/24,edge/24,Offset.Zero) {
+            translate(left,cy-edge/2) {scale(edge/24,edge/24,Offset.Zero) {
                 glyphPaint.color=ink.toArgb();slashPaint.color=ink.toArgb()
                 drawContext.canvas.nativeCanvas.drawPath(dislike,glyphPaint)
                 drawContext.canvas.nativeCanvas.drawLine(24*.12f,24*.12f,24*.88f,24*.88f,slashPaint)

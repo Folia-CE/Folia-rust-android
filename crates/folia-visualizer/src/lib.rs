@@ -1,9 +1,6 @@
 // Lyric animation styles drawn on an iced canvas. A frame is playback time plus the current audio frame.
 
 mod anim;
-mod theme_icons;
-mod monet_appearance;
-pub use monet_appearance::{MonetAppearance, Typography};
 mod background;
 mod preview;
 mod quick;
@@ -38,7 +35,6 @@ pub(crate) const BOLD: Font = Font { weight: iced_core::font::Weight::Bold, ..Fo
 /// Everything a style needs to draw one frame.
 #[derive(Clone)]
 pub struct Scene<'a> {
-    pub monet: &'a MonetAppearance,
     pub style: Style,
     pub lyrics: &'a Lyrics,
     /// Playback position in seconds.
@@ -50,13 +46,13 @@ pub struct Scene<'a> {
     /// Draws as on a stage this large, scaled down to cover the widget; `None` draws at the widget size.
     pub stage: Option<Size>,
     /// The style's saved tuning. An empty value reads as that style's defaults.
-    pub tuning: std::borrow::Cow<'a, Values>,
+    pub tuning: Values,
     /// Fills the theme background before the style. A shader behind the canvas turns this off.
     pub backdrop: bool,
     /// Song title, artist and album. Empty strings fall back to "Monet" inside that style.
-    pub title: std::borrow::Cow<'a, str>,
-    pub artist: std::borrow::Cow<'a, str>,
-    pub album: std::borrow::Cow<'a, str>,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
     /// Cover or uploaded portrait, already decoded.
     pub portrait: Option<Handle>,
     /// Style-picker and workbench pictures use Monet's static spectrum. Playback reads `audio`.
@@ -183,10 +179,6 @@ impl Scene<'_> {
             return vec![styles::still::draw(self, state, renderer, target)];
         }
         if self.style == Style::Monet {
-            if self.stage.is_none() && self.monet.lyrics_icons.is_empty() && state.monet.borrow().gpu_enabled() {
-                let (_, place) = self.placement(target);
-                return styles::monet::player_geometry(self, &mut state.monet.borrow_mut(), renderer, target, place, &state.monet_ink.borrow());
-            }
             return vec![self.monet_geometry(state, renderer, target)];
         }
         vec![self.live_geometry(state, renderer, target)]

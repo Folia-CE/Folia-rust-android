@@ -19,41 +19,51 @@ import kotlinx.coroutines.withContext
 internal val LocalFoliaDark=staticCompositionLocalOf {false}
 internal val SkyBlue=Color(0xFF87CEEB)
 private data class ArtworkPalette(val accent: Int,val clusters: IntArray?=null)
+private data class ArtworkIdentity(val id: Long,val provider: String,val onlineId: String) {
+    fun matches(value: PlaybackSnapshot)=id==value.trackId&&provider==value.provider&&onlineId==value.onlineId
+}
+
 /** No wallpaper/system dynamic colours: one artwork seed owns every semantic colour role. */
 @Composable
 internal fun FoliaTheme(bridge: FoliaBridge,dark: Boolean,playback: PlaybackSnapshot?=null,content: @Composable ()->Unit) {
-    val cache=remember(bridge) {LruCache<PlaybackArtwork,ArtworkPalette>(32)}
-    val identity=playback?.artSource()
-    var started by remember {mutableStateOf<PlaybackArtwork?>(null)}
+    val cache=remember(bridge) {LruCache<ArtworkIdentity,ArtworkPalette>(32)}
+    val identity=playback?.let {ArtworkIdentity(it.trackId,it.provider,it.onlineId)}
+    var started by remember {mutableStateOf<ArtworkIdentity?>(null)}
     val latestIdentity=rememberUpdatedState(identity)
     LaunchedEffect(identity,playback?.state,playback?.loading) {
         if(playback?.state==TransportState.PLAYING || playback?.loading==true) started=identity
         else if(playback==null || playback.queueLength==0) started=null
     }
     // Pausing retains the current cover theme. A restored, never-started queue stays sky blue.
-    var seedOwner by remember {mutableStateOf<PlaybackArtwork?>(null)}
+    var seedOwner by remember {mutableStateOf<ArtworkIdentity?>(null)}
     val seed by produceState(ArtworkPalette(SkyBlue.toArgb()),started,bridge) {
         val key=started
         if(key==null) {seedOwner=null;value=ArtworkPalette(SkyBlue.toArgb());return@produceState}
         cache.get(key)?.let {if(latestIdentity.value==key) {seedOwner=key;value=it};return@produceState}
         // Keep the displayed seed during a cover fetch; do not flash blue between tracks.
-        val found=bridge.readArtwork(key) { bytes ->
-            val bounds=BitmapFactory.Options().apply {inJustDecodeBounds=true}
-            BitmapFactory.decodeByteArray(bytes,0,bytes.size,bounds)
-            var sample=1
-            while(maxOf(bounds.outWidth,bounds.outHeight)/sample>96) sample*=2
-            val bitmap=BitmapFactory.decodeByteArray(bytes,0,bytes.size,BitmapFactory.Options().apply {inSampleSize=sample}) ?: return@readArtwork null
-            try {
-                val pixels=IntArray(bitmap.width*bitmap.height)
-                bitmap.getPixels(pixels,0,bitmap.width,0,0,bitmap.width,bitmap.height)
-                if(pixels.any {(it ushr 24)>=20}) ArtworkPalette(SpatialNative.coverAccent(pixels),SpatialNative.coverClusters(pixels,bitmap.width,bitmap.height)) else ArtworkPalette(SkyBlue.toArgb())
-            } finally {bitmap.recycle()}
+        repeat(80) {
+            val found=withContext(Dispatchers.IO) {
+                runCatching {
+                    if(!key.matches(bridge.status())) return@runCatching null
+                    val bytes=bridge.artwork()?.takeIf {it.isNotEmpty()} ?: return@runCatching null
+                    val bounds=BitmapFactory.Options().apply {inJustDecodeBounds=true}
+                    BitmapFactory.decodeByteArray(bytes,0,bytes.size,bounds)
+                    var sample=1
+                    while(maxOf(bounds.outWidth,bounds.outHeight)/sample>96) sample*=2
+                    val bitmap=BitmapFactory.decodeByteArray(bytes,0,bytes.size,BitmapFactory.Options().apply {inSampleSize=sample}) ?: return@runCatching null
+                    val color=try {
+                        val pixels=IntArray(bitmap.width*bitmap.height)
+                        bitmap.getPixels(pixels,0,bitmap.width,0,0,bitmap.width,bitmap.height)
+                        if(pixels.any {(it ushr 24)>=20}) ArtworkPalette(SpatialNative.coverAccent(pixels),SpatialNative.coverClusters(pixels,bitmap.width,bitmap.height)) else ArtworkPalette(SkyBlue.toArgb())
+                    } finally {bitmap.recycle()}
+                    if(key.matches(bridge.status())) color else null
+                }.getOrNull()
+            }
+            if(latestIdentity.value!=key) return@produceState
+            if(found!=null) {cache.put(key,found);seedOwner=key;value=found;return@produceState}
+            delay(250)
         }
-        if(latestIdentity.value==key) {
-            if(found!=null) cache.put(key,found)
-            seedOwner=key
-            value=found ?: ArtworkPalette(SkyBlue.toArgb())
-        }
+        if(latestIdentity.value==key) {seedOwner=key;value=ArtworkPalette(SkyBlue.toArgb())}
     }
     val target=remember(seed,dark) {foliaColorScheme(Color(seed.accent),dark)}
     val playerTarget=remember(seed,dark) {playerPalette(seed.clusters,dark)}

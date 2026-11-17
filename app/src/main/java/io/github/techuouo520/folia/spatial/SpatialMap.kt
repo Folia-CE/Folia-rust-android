@@ -1,8 +1,5 @@
 package io.github.techuouo520.folia.spatial
 
-import io.github.techuouo520.folia.LocalGripGate
-import io.github.techuouo520.folia.GripGate
-import io.github.techuouo520.folia.PinMusicBarSide
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.graphics.toArgb
 import android.content.Context
@@ -25,10 +22,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.zIndex
-import androidx.compose.ui.semantics.CustomAccessibilityAction
-import androidx.compose.ui.semantics.customActions
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.res.painterResource
@@ -70,9 +63,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import kotlin.math.hypot
 
 import io.github.techuouo520.folia.FoliaApp
-import io.github.techuouo520.folia.LocalCornerNavigation
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.ui.input.pointer.pointerInput
 
 private const val A = DailySpatialProtocol.ACTION
 private const val RH = DailySpatialProtocol.RHINE
@@ -97,9 +87,7 @@ fun SpatialMap(
     onSceneReady: () -> Unit = {},
     onSceneLost: () -> Unit = {},
     onCollectionVisible: (Boolean) -> Unit = {},
-    albumContent: @Composable (String) -> Unit,
-    onAlbumVisible: (Boolean) -> Unit = {},
-    collectionContent: @Composable (SpatialItem, Int, Boolean, Boolean, Boolean) -> Unit = { _, _, _, _, _ -> },
+    collectionContent: @Composable (SpatialItem, Int, Boolean, Boolean, Boolean, (Boolean) -> Unit) -> Unit = { _, _, _, _, _, _ -> },
 ) {
     val presented=rememberUpdatedState(onFramePresented)
     val sceneReady=rememberUpdatedState(onSceneReady)
@@ -110,9 +98,6 @@ fun SpatialMap(
     val hdrEnabled=FoliaApp.from(context).displaySettings.hdrEnabled
     val callbacks=rememberUpdatedState(MapActions(onPlay,onToggle,onNext,isFavorite,onFavorite,onDislike,onPreload))
     val controller=remember { MapController(context,source,initialStyle,sceneActive,if(chrome) DailySpatialCovers.INITIAL_PREVIEWS else 48) { callbacks.value } }
-    val gripGate = LocalGripGate.current
-    SideEffect { controller.gripGate = gripGate }
-    PinMusicBarSide(sceneActive && interactive && controller.contextActive)
     DisposableEffect(controller) {
         val app=context.applicationContext
         val memory=object: android.content.ComponentCallbacks2 {
@@ -135,18 +120,7 @@ fun SpatialMap(
         onDispose { lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(hdrEnabled) {controller.setHdrEnabled(hdrEnabled)}
-    val coveredByPlayer = io.github.techuouo520.folia.LocalPlayerCoversPage.current
-    // Keep the map surface and camera pose for the return flight, but release its frame budget
-    // while the opaque lyrics viewport covers it. Re-enable as soon as the exit intent arrives.
-    val coveredByLyrics by remember(controller) { derivedStateOf {
-        controller.albumCamera?.let { it.entering && it.progress >= 1f } == true
-    } }
-    val coveredByCollection by remember(controller) { derivedStateOf {
-        controller.entry?.let { it.openRequested && it.progress == 1f } == true
-    } }
-    LaunchedEffect(sceneActive,coveredByPlayer,coveredByLyrics,coveredByCollection) {
-        controller.setVisible(sceneActive && !coveredByPlayer && !coveredByLyrics && !coveredByCollection)
-    }
+    LaunchedEffect(sceneActive) { controller.setVisible(sceneActive) }
     LaunchedEffect(expansionComplete,sceneActive) { controller.expandCollection(expansionComplete&&sceneActive) }
     LaunchedEffect(controller.entry!=null) { collectionVisible.value(controller.entry!=null) }
     DisposableEffect(Unit) { onDispose { collectionVisible.value(false) } }
@@ -169,35 +143,16 @@ fun SpatialMap(
             }
         }
     }
-    val accessibleLyricsCell by remember(controller) { derivedStateOf {
-        controller.drawVersion.intValue
-        AlbumLyricsChip.cell(controller.frame)
-    } }
     val frame=controller.frame
-    val collectionProjection = LocalCollectionEntry.current
-    val camera = controller.albumCamera
-    val ground = if (dark) Color(0xFF09090B) else Color(0xFFF9F7F3)
-    LaunchedEffect(camera != null) { onAlbumVisible(camera != null) }
-    val navigation = LocalCornerNavigation.current
-    if (camera != null) {
-        AnimateAlbumCamera(camera) { controller.finishAlbum(camera) }
-        DisposableEffect(camera, navigation, sceneActive) {
-            if (sceneActive) navigation?.attach(camera)
-            onDispose { navigation?.detach(camera) }
-        }
-        BackHandler(camera.entering && sceneActive && interactive && navigation?.modalOpen != true) { camera.entering = false }
-    }
     val parentWorld=rememberGraphicsLayer()
     val underWorld=rememberGraphicsLayer()
-    BackHandler(camera == null && sceneActive && interactive && controller.contextActive && controller.entry == null) { controller.command(if(frame[RH]>.5f) 23 else 16) }
-    val returning = controller.entry?.openRequested == false || camera?.entering == false
-    LaunchedEffect(returning) { if (returning) controller.resumeReturningMap() }
+    BackHandler(sceneActive && interactive && controller.contextActive && controller.entry == null) { controller.command(if(frame[RH]>.5f) 23 else 16) }
     Box(modifier.fillMaxSize().graphicsLayer { alpha=if(chrome&&controller.ready) controller.presentationAlpha else 1f }.background(if(dark) Color.Black else Color.White).drawWithContent {
         controller.uiDrawVersion.intValue
         drawContent()
         controller.onUiDrawn()
     }) {
-        Box(Modifier.fillMaxSize().albumCamera(camera, parentWorld, ground).drawWithContent {
+        Box(Modifier.fillMaxSize().drawWithContent {
             parentWorld.record {this@drawWithContent.drawContent()}
             underWorld.record {drawLayer(parentWorld)}
             val owner=controller.entry
@@ -216,7 +171,6 @@ fun SpatialMap(
                 surfaceTextureListener=object: TextureView.SurfaceTextureListener {
                     override fun onSurfaceTextureAvailable(texture: SurfaceTexture,w: Int,h: Int) {
                         controller.width=w;controller.height=h;controller.attached=true
-                        controller.surfaceTexture=texture
                         controller.renderer.attach(texture,w,h,true)
                         controller.surfaceDisplay=display
                     }
@@ -236,55 +190,32 @@ fun SpatialMap(
             } },
             modifier=Modifier.fillMaxSize(),
         )
-        Box(Modifier.fillMaxSize().semantics {
-            val cell = accessibleLyricsCell
-            if (cell >= 0 && interactive && sceneActive && !coveredByPlayer && camera == null &&
-                controller.ready && controller.entry == null && !controller.contextActive) {
-                customActions = listOf(CustomAccessibilityAction("歌词") { controller.openPlayingLyrics(cell); true })
-            }
-        }.pointerInteropFilter { if(interactive) controller.touch(it, collectionProjection) else true })
+        Box(Modifier.fillMaxSize().pointerInteropFilter { if(interactive) controller.touch(it) else true })
         MapCaptions(controller,shownItems,dark,controller.playingIndex,playing,captionMeasurer,captionCache) { cell,song -> controller.play(cell,song) }
         }
         }
-        if (camera != null) {
-            // Swallow map gestures inside the lyric viewport; retain app chrome and transport.
-            Box(Modifier.fillMaxSize().graphicsLayer {
-                alpha = if (camera.progress > 0f) camera.pose[4] else 0f
-            }.background(ground).pointerInput(camera) {
-                detectTapGestures { }
-            }) {
-                key(camera) { albumContent(camera.itemKey) }
-            }
-        }
-        if (camera?.entering != true) Box(Modifier.fillMaxSize().zIndex(if (returning) 2f else 0f)) {
-            MapActionsOverlay(controller,frame,shownItems,dark)
-        }
-        if(chrome && camera?.entering != true && controller.entry?.openRequested != true) {
+        MapActionsOverlay(controller,frame,shownItems,dark)
+        if(chrome) {
             if(controller.rhineScene) Column(Modifier.windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top+WindowInsetsSides.Horizontal)).padding(start=16.dp,top=84.dp,end=16.dp,bottom=8.dp)) {
                 SceneLabel("RHINE LAB",dark,large=true)
                 SceneLabel("SYNTHESIZE INFORMATION",dark,muted=true)
                 SceneLabel("ANALYSIS  OS",dark)
             }
             SceneIcon(SceneGlyph.Locate,"定位播放",dark,controller.rhineScene,
-                Modifier.align(Alignment.BottomEnd).zIndex(if (returning) 2f else 0f).windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)).padding(end=16.dp,bottom=16.dp+bottomInset),enabled=controller.playingIndex>=0,
+                Modifier.align(Alignment.BottomEnd).windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)).padding(end=16.dp,bottom=16.dp+bottomInset),enabled=controller.playingIndex>=0,
                 onClick={controller.command(14)})
         }
         controller.dust?.let { SpatialDustLayer(it,controller.contextPhase==3) }
         controller.retainedEntry?.let { entry ->
             key(entry.item.key,entry.style) {
-                CollectionReveal(entry,controller.entry!=null,dark,parentWorld,onClosed=controller::finishEntry,content=collectionContent)
+                CollectionReveal(entry,controller.entry!=null,dark,parentWorld,onClosed=controller::finishEntry,onParentTap=controller::tapReturningParent,content=collectionContent)
             }
         }
-        // Keep this receiver mounted across the end of the flight so a held drag keeps its owner.
-        Box(Modifier.fillMaxSize().zIndex(if (returning) 1f else -1f).pointerInteropFilter { event ->
-            if (event.actionMasked == MotionEvent.ACTION_DOWN &&
-                (!interactive || !sceneActive || !controller.returning)) false
-            else controller.touch(event, collectionProjection)
-        })
         if(!controller.ready) Box(Modifier.fillMaxSize().background(if(dark) Color.Black else Color.White))
         if(!controller.ready && chrome) Column(Modifier.align(Alignment.Center).padding(24.dp),horizontalAlignment=Alignment.CenterHorizontally) {
             if(controller.failure==null) {
                 if(sceneActive) SceneLoading(dark)
+                SceneLabel("${controller.prepared} / ${controller.total}",dark,Modifier.padding(top=12.dp),muted=true)
             } else {
                 SceneLabel(controller.failure!!,dark)
                 SceneIcon(SceneGlyph.Retry,"重试",dark,controller.rhineScene,onClick={controller.retry()})
@@ -316,8 +247,8 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
     var items: List<SpatialItem> = emptyList()
     var ready by mutableStateOf(false)
     var failure by mutableStateOf<String?>(null)
-    var albumCamera by mutableStateOf<AlbumCamera?>(null)
-        private set
+    var prepared by mutableIntStateOf(0)
+    var total by mutableIntStateOf(0)
     var dust by mutableStateOf<SpatialDust?>(null)
     var entry by mutableStateOf<CollectionEntry?>(null)
         private set
@@ -326,11 +257,11 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
         private set
     fun trimRetained() { if(entry==null) retainedEntry=null }
     private var pendingOpen: Pair<Int,SpatialItem>?=null
+    private var queuedOpen: Pair<Int,SpatialItem>?=null
     var playingIndex by mutableIntStateOf(-1)
     private var playingKey: String?=null
     private var running=false
     var width=0;var height=0;var attached=false;var resetClock=true
-    var surfaceTexture: SurfaceTexture? = null
     var surfaceDisplay: android.view.Display?=null
         set(value) { field=value;hdr.setActive(hdrEnabled&&hdrSupported&&active&&visible,value) }
     private var hdrSupported=false
@@ -353,13 +284,12 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
     }
     fun suspendRendering() { active=false;resetClock=true;main.removeCallbacks(tick);framePacer.reset();scheduled=false;waitingForUi=false;hdr.close() }
     fun surfaceDetached() {
-        surfaceTexture=null;attached=false;gpuReady=false;ready=false;inFlight=false;resetClock=true
+        attached=false;gpuReady=false;ready=false;inFlight=false;resetClock=true
         main.removeCallbacks(tick);framePacer.reset();scheduled=false;waitingForUi=false;hdr.close()
     }
-    private var closed=false;private var gpuReady=false
+    private var closed=false;private var gpuReady=false;private var warmReady=false
     private var inFlight=false;private var dirty=false;private var scheduled=false;private var epoch=0
     var paintCapture: ((android.graphics.Bitmap,android.graphics.Rect,FloatArray)->Unit)?=null
-    private var submittedCamera: AlbumCamera? = null
     private var capturePending=false
     private var waitingForUi = false
     private var layoutStyle = initialStyle
@@ -368,7 +298,7 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
     val renderer: DailySpatialRenderer=DailySpatialRenderer(context,density,covers,object: DailySpatialRenderer.Listener {
         override fun onReady() { if(!closed) { gpuReady=true;inFlight=false;resetClock=true;reveal() } }
         override fun onHdrReady(supported: Boolean) { hdrSupported=supported;hdr.setActive(hdrEnabled&&supported&&active&&visible,surfaceDisplay) }
-        override fun onFailure() { if(!closed) { gpuReady=false;ready=false;failure="地图渲染初始化失败";inFlight=false } }
+        override fun onFailure() { if(!closed) { ready=false;failure="地图渲染初始化失败";inFlight=false } }
         override fun onDirty() { wake() }
         override fun onFrameComplete(values: FloatArray?,swapped: Boolean) {
             inFlight=false
@@ -379,10 +309,6 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
                 frame[A+27]!=values[A+27] || frame[A+23]!=values[A+23] || frame[16]!=values[16] || frame[24]!=values[24] || frame[RH]!=values[RH]
             val menuChanged = menuChanged(frame,values)
             values.copyInto(frame)
-            val camera = albumCamera
-            if (camera != null && camera === submittedCamera && (camera.entering || camera.face != null)) {
-                camera.followFrame(frame, density, width, height, worldChanged, idle = !dirty && frame[0] == 0f)
-            }
             presentationAlpha=(frame[1]*frame[A+DailySpatialProtocol.STYLE_ALPHA]).coerceIn(0f,1f)
             rhineScene=frame[RH]>.5f
             contextPhase=frame[A+3].toInt()
@@ -407,17 +333,13 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
     private val progressive=previewLimit<DailySpatialCovers.INITIAL_PREVIEWS
     init {
         covers.setDirty(::wake);style(initialStyle)
-        if(progressive) command(33,0)
+        if(progressive) { warmReady=true;command(33,0) }
     }
     fun expandCollection(expanded: Boolean) { if(progressive) command(33,if(expanded) 1 else 0) }
     private var deferredItems: List<SpatialItem>?=null
     fun updateItems(next: List<SpatialItem>) {
         if(entry!=null||pendingOpen!=null) { deferredItems=next;return }
         if(next==items) return
-        albumCamera?.let { camera ->
-            if (next.indexOfFirst { it.key == camera.itemKey } != items.indexOfFirst { it.key == camera.itemKey })
-                camera.entering=false
-        }
         backgroundVersion.intValue++;drawVersion.intValue++;menuVersion++
         ++epoch;if(capturePending) command(22);renderer.cancelCapture();capturePending=false
         val removed=items.indices.filter { i -> next.none { it.key==items[i].key } }
@@ -430,51 +352,40 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
             append -> command(0,next.size)
             else -> command(10,next.size,0f,playingIndex.toFloat())
         }
-        syncPlaybackLayout()
-        if(!ready) reveal() else wake()
+        command(2,playingIndex,if(running) 1f else 0f)
+        if(!warmReady) retry() else if(!ready) reveal() else wake()
     }
     fun retry() {
-        failure=null
-        surfaceTexture?.let { renderer.attach(it,width,height,true) }
+        failure=null;ready=false;val token=++epoch
+        if(progressive) {
+            // Covers are requested only by the admitted spatial cells. Never put IO before
+            // the first frame or make the card morph wait for preview/HD batch completion.
+            warmReady=true;reveal();return
+        }
+        covers.warm(items,previewLimit,{done,count->prepared=done;total=count}) {
+            if(!closed && token==epoch) { warmReady=true;reveal() }
+        }
     }
     private fun reveal() {
-        if(closed || !gpuReady || items.isEmpty() || ready) return
-        // Live frame bindings request visible previews and HD covers within the upload budget.
-        ready=true
-        command(3,1)
+        if(closed||!gpuReady||!warmReady) return
+        if(progressive) { ready=true;command(3,1);wake();return }
+        val token=epoch
+        renderer.prepareArtwork(playingIndex,Runnable {
+            if(!closed&&token==epoch) { ready=true;command(3,1);wake() }
+        })
     }
     fun style(style: Int) { layoutStyle=style;command(30,style);renderer.setLayoutStyle(style) }
     fun setPlayback(key: String?,playing: Boolean) {
         playingKey=key;playingIndex=items.indexOfFirst { it.key==key };running=playing
         if(playingIndex>=0 && !progressive) renderer.prioritizeArtwork(playingIndex)
-        syncPlaybackLayout()
-    }
-    private fun syncPlaybackLayout() {
-        // Audio confirmation can arrive after the first map frame. The entry owns the visual
-        // target until return; the transport and playback metadata always use the real queue.
-        val camera = albumCamera
-        val focus = if (camera != null && camera.entering) items.indexOfFirst { it.key == camera.itemKey } else -1
-        command(2, if (focus >= 0) focus else playingIndex, if (running) 1f else 0f)
+        command(2,playingIndex,if(playing) 1f else 0f)
     }
     fun command(op: Int,index: Int=0,a: Float=0f,b: Float=0f) {
         if(closed) return
         SpatialNative.dailySpatialCommand(state,op,index,a,b);wake()
     }
-    val returning get() = entry?.openRequested == false || albumCamera?.entering == false
-    private val worldPaused get() = entry?.openRequested == true ||
-        albumCamera?.let { it.entering && it.worldAtRest } == true
-
-    fun resumeReturningMap() {
-        entry?.let { owner ->
-            if (!owner.openRequested && !owner.parentRestored) {
-                owner.parentRestored = true
-                command(32)
-            }
-        }
-        wake()
-    }
     fun wake() {
-        if(closed||!attached||!active||!visible||worldPaused) return
+        if(closed||!attached||!active||!visible||entry!=null) return
         if(inFlight) { dirty=true;return }
         if(scheduled) return
         waitingForUi=false;scheduled=true;main.post(tick)
@@ -483,7 +394,7 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
         if(waitingForUi) { waitingForUi=false;wake() }
     }
     private fun submit() {
-        if(!ready||!attached||!active||!visible||closed||worldPaused||width<=0||height<=0) {
+        if(!ready||!attached||!active||!visible||closed||entry!=null||width<=0||height<=0) {
             resetClock=true;framePacer.reset();return
         }
         if(inFlight) { dirty=true;return }
@@ -492,7 +403,6 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
         val delay=framePacer.remaining(now,rhine)
         if(delay>0) { scheduled=true;framePacer.schedule(delay);return }
         framePacer.started(now,rhine)
-        submittedCamera=albumCamera
         inFlight=true;renderer.submitMotion(state,width/density,height/density,resetClock);resetClock=false
     }
     private fun menuChanged(previous: FloatArray,next: FloatArray): Boolean {
@@ -510,44 +420,11 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
         command(1,cell)
         if(song==playingIndex) actions().toggle() else { command(29,song);actions().play(item) }
     }
-    private fun playFromDoubleTap(cell: Int, index: Int) {
-        val item = items.getOrNull(index) ?: return
-        if (!item.collection && !(index == playingIndex && running) && width > 0 && height > 0 && song(cell) == index) {
-            albumCamera = AlbumCamera(cell,item.key)
-        }
-        play(cell,index)
-        if (albumCamera != null) {
-            if (index == playingIndex) command(29,index)
-            syncPlaybackLayout()
-        }
-    }
-    fun openPlayingLyrics(cell: Int) {
-        val item = items.getOrNull(playingIndex) ?: return
-        if (item.collection || item.key != playingKey || cell < 0 || frame[A+22].toInt() != cell ||
-            song(cell) != playingIndex || albumCamera?.entering == true || entry?.openRequested == true || capturePending) return
-        val camera = albumCamera?.takeIf { it.cell == cell && it.itemKey == item.key } ?: AlbumCamera(cell,item.key)
-        camera.entering = true
-        albumCamera = camera
-        if (contextActive) command(16)
-        camera.followFrame(frame,density,width,height,worldChanged=true,idle=false)
-        syncPlaybackLayout()
-    }
-    fun finishAlbum(camera: AlbumCamera) {
-        if (albumCamera !== camera || camera.entering) return
-        albumCamera=null
-        resetClock=true
-        syncPlaybackLayout()
-    }
     fun openCollection(cell: Int,item: SpatialItem) {
         entry?.let { current ->
-            if(current.item.key==item.key) {
-                if (current.parentRestored) { command(31); current.parentRestored = false }
-                current.openRequested=true
-                return
-            }
-            if (current.openRequested) return
-            // A new card can take ownership while the old card is still folding away.
-            resumeReturningMap()
+            if(current.item.key==item.key) {queuedOpen=null;current.openRequested=true}
+            else {queuedOpen=cell to item;current.openRequested=false}
+            return
         }
         main.removeCallbacks(longPress);main.removeCallbacks(tick);framePacer.reset();scheduled=false
         if(inFlight) {pendingOpen=cell to item;return}
@@ -559,12 +436,23 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
         retainedEntry=entry
         lastTap=0;resetClock=true
     }
+    fun tapReturningParent(point: Offset) {
+        val current=entry ?: return
+        if(current.openRequested) return
+        val cell=SpatialNative.dailySpatialHit(state,point.x/density,point.y/density)
+        items.getOrNull(song(cell))?.takeIf {it.collection}?.let {openCollection(cell,it)}
+    }
     fun finishEntry(owner: CollectionEntry) {
         if(entry!==owner || owner.openRequested) return
-        resumeReturningMap()
         entry=null
         deferredItems?.let { deferredItems=null;updateItems(it) }
+        SpatialNative.dailySpatialCommand(state,32,0,0f,0f)
+        val next=queuedOpen;queuedOpen=null
         resetClock=true
+        if(next!=null) {
+            // Resolve the next source from a newly presented parent frame, never an old quad.
+            pendingOpen=next
+        }
         wake()
     }
     private fun song(cell: Int): Int {
@@ -580,68 +468,30 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
     private var lastTap=0L;private var tapCell=-1;private var tapSong=-1;private var tapX=0f;private var tapY=0f
     private var velocity: VelocityTracker?=null
     private val config=ViewConfiguration.get(context)
-    var gripGate: GripGate? = null
-    private var gestureDown = Long.MIN_VALUE
     private val longPress=Runnable {
-        if(pointer>=0&&!dragging&&!pinching&&downCell>=0) { gripGate?.resolve(gestureDown,false);lifted=true;lastTap=0;command(15,downCell) }
+        if(pointer>=0&&!dragging&&!pinching&&downCell>=0) { lifted=true;lastTap=0;command(15,downCell) }
     }
     private val scale=ScaleGestureDetector(context,object: ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScaleBegin(detector: ScaleGestureDetector): Boolean { main.removeCallbacks(longPress);pinching=true;command(11);return true }
         override fun onScale(detector: ScaleGestureDetector): Boolean { command(12,a=detector.scaleFactor);return true }
         override fun onScaleEnd(detector: ScaleGestureDetector) { command(13) }
     })
-    private var pressedLyrics = false
-
-    private fun lyricsAt(cell: Int, x: Float, y: Float): Boolean {
-        if (cell < 0 || cell != AlbumLyricsChip.cell(frame) || contextActive ||
-            items.getOrNull(playingIndex)?.collection != false) return false
-        for (slot in 0 until frame[16].toInt()) {
-            val o = DailySpatialProtocol.HEADER + slot*DailySpatialProtocol.STRIDE
-            if (frame[o+7].toInt() == cell && frame[o].toInt() == playingIndex)
-                return AlbumLyricsChip.contains(frame, slot, x/density, y/density)
-        }
-        return false
-    }
-
-    private val pickPoint = FloatArray(2)
-    private fun pick(x: Float, y: Float, projection: CollectionEntry?): Int {
-        pickPoint[0] = x
-        pickPoint[1] = y
-        if (projection != null && projection.progress < 1f) {
-            projection.screenToPage.mapPoints(pickPoint)
-            if (pickPoint[0] !in 0f..projection.visibleWidth || pickPoint[1] !in 0f..projection.visibleHeight) return -1
-        }
-        albumCamera?.takeIf { !it.entering }?.let { camera ->
-            pickPoint[0] = (pickPoint[0] - camera.pose[1] * width) / camera.pose[0]
-            pickPoint[1] = (pickPoint[1] - camera.pose[2] * height) / camera.pose[0]
-        }
-        return SpatialNative.dailySpatialHit(state,pickPoint[0]/density,pickPoint[1]/density)
-    }
-
-    fun touch(event: MotionEvent, projection: CollectionEntry?): Boolean {
-        if(!ready || capturePending || entry?.openRequested == true || pendingOpen!=null || albumCamera?.entering == true) return true
-        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-            if (returning) resumeReturningMap()
-            if (progressive && projection?.progress != 1f) expandCollection(true)
-        }
+    fun touch(event: MotionEvent): Boolean {
+        if(!ready||capturePending||entry!=null||pendingOpen!=null) return true
         val rhine=frame[RH]>.5f
-        if(frame[A+3]>0 && event.actionMasked==MotionEvent.ACTION_DOWN) { gripGate?.resolve(event.downTime,false);dismissing=true;command(16);return true }
+        if(frame[A+3]>0 && event.actionMasked==MotionEvent.ACTION_DOWN) { dismissing=true;command(16);return true }
         if(dismissing) { if(event.actionMasked==MotionEvent.ACTION_UP||event.actionMasked==MotionEvent.ACTION_CANCEL) dismissing=false;return true }
         if(!rhine) scale.onTouchEvent(event)
         when(event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 pointer=event.getPointerId(0);downX=event.x;downY=event.y;lastX=downX;lastY=downY
                 dragging=false;pinching=false;lifted=false
-                downCell=pick(downX, downY, projection)
-                gestureDown = event.downTime
-                pressedLyrics = lyricsAt(downCell, pickPoint[0], pickPoint[1])
-                if (pressedLyrics) gripGate?.resolve(gestureDown, false)
-                else if (downCell >= 0) gripGate?.defer(gestureDown)
+                downCell=SpatialNative.dailySpatialHit(state,downX/density,downY/density)
                 items.getOrNull(song(downCell))?.takeIf {it.collection}?.let {actions().preload(it)}
                 renderer.prioritizeArtwork(song(downCell));main.postDelayed(longPress,ViewConfiguration.getLongPressTimeout().toLong())
                 velocity?.recycle();velocity=VelocityTracker.obtain();velocity?.addMovement(event)
             }
-            MotionEvent.ACTION_POINTER_DOWN -> { gripGate?.resolve(gestureDown,false);main.removeCallbacks(longPress);pinching=true;if(browsing) { command(28);browsing=false } }
+            MotionEvent.ACTION_POINTER_DOWN -> { main.removeCallbacks(longPress);pinching=true;if(browsing) { command(28);browsing=false } }
             MotionEvent.ACTION_POINTER_UP -> {
                 if(event.getPointerId(event.actionIndex)==pointer) {
                     val i=if(event.actionIndex==0) 1 else 0
@@ -651,7 +501,7 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
             MotionEvent.ACTION_MOVE -> {
                 val i=event.findPointerIndex(pointer);if(i<0||lifted) return true
                 val x=event.getX(i);val y=event.getY(i);velocity?.addMovement(event)
-                if(hypot(x-downX,y-downY)>config.scaledTouchSlop) { if (!dragging && !pinching) gripGate?.resolve(gestureDown,!pressedLyrics);dragging=true;main.removeCallbacks(longPress) }
+                if(hypot(x-downX,y-downY)>config.scaledTouchSlop) { dragging=true;main.removeCallbacks(longPress) }
                 if(dragging&&!pinching) {
                     if(rhine) { if(!browsing) { command(26);browsing=true };command(27,a=(x-lastX)/density,b=(y-lastY)/density) }
                     else command(4,a=(x-lastX)/density,b=(y-lastY)/density)
@@ -660,19 +510,14 @@ private class MapController(context: Context,source: (String)->ByteArray?,initia
             }
             MotionEvent.ACTION_UP,MotionEvent.ACTION_CANCEL -> {
                 main.removeCallbacks(longPress)
-                gripGate?.resolve(gestureDown,event.actionMasked==MotionEvent.ACTION_UP && !lifted && !pressedLyrics && !pinching)
                 if(browsing) { command(28);browsing=false }
                 if(pinching&&!rhine) command(13)
                 if(event.actionMasked==MotionEvent.ACTION_UP&&!lifted) {
                     if(!dragging&&!pinching) {
                         val twice=lastTap>0 && event.eventTime-lastTap<=ViewConfiguration.getDoubleTapTimeout() && hypot(downX-tapX,downY-tapY)<=config.scaledDoubleTapSlop && (downCell==tapCell||frame[24]>.5f)
                         val selected=items.getOrNull(song(downCell))
-                        if (pressedLyrics && pick(event.x, event.y, projection) == downCell &&
-                            lyricsAt(downCell, pickPoint[0], pickPoint[1])) {
-                            lastTap=0
-                            openPlayingLyrics(downCell)
-                        } else if(selected?.collection==true) { openCollection(downCell,selected);lastTap=0 }
-                        else if(twice) { playFromDoubleTap(tapCell,tapSong);lastTap=0 }
+                        if(selected?.collection==true) { openCollection(downCell,selected);lastTap=0 }
+                        else if(twice) { play(tapCell,tapSong);lastTap=0 }
                         else { command(1,downCell);lastTap=event.eventTime;tapCell=downCell;tapSong=song(downCell);tapX=downX;tapY=downY }
                     } else if(!rhine&&!pinching) { velocity?.computeCurrentVelocity(1000);command(5,a=(velocity?.xVelocity ?: 0f)/density,b=(velocity?.yVelocity ?: 0f)/density) }
                 }
@@ -734,17 +579,10 @@ private fun MapActionsOverlay(controller: MapController,frame: FloatArray,items:
     val material=Color(controller.menuMaterial(item,dark))
     repeat(4) { i ->
         val o=A+96+i*4;val alpha=frame[A+116+i]
-        val split = i == 3 && !item.collection && frame[A+4] == frame[A+22] && frame[A+5].toInt() == controller.playingIndex
-        val w = if(split) (frame[o+2]-6f)*.5f else frame[o+2]
-        if (split && alpha>.005f) SpatialActionTile(4,"歌词",false,false,material,
-            enabled=alpha>.6f&&frame[A+3]==1f&&frame[A+26]<.5f,
-            modifier=Modifier.offset((frame[o]+w+6f).dp,frame[o+1].dp)
-                .size(w.coerceAtLeast(1f).dp,frame[o+3].coerceAtLeast(1f).dp)
-                .graphicsLayer {this.alpha=alpha.coerceIn(0f,1f)}) { controller.openPlayingLyrics(frame[A+4].toInt()) }
         if(alpha>.005f) SpatialActionTile(i,labels[i],item.collection,favorite,material,
             enabled=alpha>.6f&&frame[A+3]==1f&&frame[A+26]<.5f,
             modifier=Modifier.offset(frame[o].dp,frame[o+1].dp)
-                .size(w.coerceAtLeast(1f).dp,frame[o+3].coerceAtLeast(1f).dp)
+                .size(frame[o+2].coerceAtLeast(1f).dp,frame[o+3].coerceAtLeast(1f).dp)
                 .graphicsLayer {this.alpha=alpha.coerceIn(0f,1f)}) {
                 if(i==3) controller.command(17)
                 else { controller.command(16);when(i) {

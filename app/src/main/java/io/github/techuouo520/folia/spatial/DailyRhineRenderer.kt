@@ -177,7 +177,6 @@ constructor(context:Context?, private val hdrSurface:Boolean) {
         if (status[0] == 0) throw IllegalStateException(GLES30.glGetProgramInfoLog(depthProgram))
         depthScreen = GLES30.glGetUniformLocation(depthProgram, "u_screen")
         depthProjection = GLES30.glGetUniformLocation(depthProgram, "u_projection_offset")
-        for (p in intArrayOf(program, rimProgram, opaqueProgram)) AlbumLyricsChip.configure(p)
         mainUniforms = SceneUniforms(program)
         rimUniforms = SceneUniforms(rimProgram)
         activeUniforms = mainUniforms

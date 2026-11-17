@@ -1,11 +1,27 @@
 package io.github.techuouo520.folia.spatial
 
-import io.github.techuouo520.folia.MotionKernel
+import kotlin.math.abs
+import kotlin.math.exp
 
-/** Independently owned by each camera. Retargeting preserves position and velocity. */
+/** Exact critically damped spring. Retargeting changes only the goal, never position/velocity. */
 internal class CollectionMotion(private val frequency: Double) {
-    private val state = DoubleArray(2)
-    val position get() = state[0]
-    val velocity get() = state[1]
-    fun step(target: Double, seconds: Double) = MotionKernel.travel(state, target, seconds, frequency, false)
+    var position=0.0
+        private set
+    var velocity=0.0
+        private set
+
+    fun step(target: Double, seconds: Double): Boolean {
+        val dt=seconds.coerceIn(0.0,.05)
+        if(dt==0.0) return abs(position-target)>.0001 || abs(velocity)>.001
+        val offset=position-target
+        val tangent=velocity+frequency*offset
+        val decay=exp(-frequency*dt)
+        position=target+(offset+tangent*dt)*decay
+        velocity=(velocity-frequency*tangent*dt)*decay
+        if(position<0.0) {position=0.0;velocity=velocity.coerceAtLeast(0.0)}
+        if(position>1.0) {position=1.0;velocity=velocity.coerceAtMost(0.0)}
+        val moving=abs(position-target)>.0001 || abs(velocity)>.001
+        if(!moving) {position=target;velocity=0.0}
+        return moving
+    }
 }

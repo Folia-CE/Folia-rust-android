@@ -61,25 +61,12 @@ pub struct Status {
     pub duration: f64,
 }
 
-/// Audio callback clock for renderers that must not wait on the command queue.
-#[derive(Clone)]
-pub struct PlaybackClock { shared:Arc<Shared>, rate:u32, analyser: Arc<std::sync::Mutex<Analyser>> }
-impl PlaybackClock {
-    pub fn position(&self) -> f64 { timeline(&self.shared,self.rate).position }
-    pub fn belongs_to(&self, player: &Player) -> bool { Arc::ptr_eq(&self.shared, &player.shared) }
-    pub fn spectrum(&self, wall_ms: f64) -> AudioFrame {
-        self.analyser.lock().map_or(AudioFrame::SILENT, |mut tap| {
-            *tap.frame(self.shared.state() == PlayerState::Playing, wall_ms)
-        })
-    }
-}
-
 pub struct Player {
     commands: Sender<Command>,
     shared: Arc<Shared>,
     stream: output::Stream,
     rate: u32,
-    analyser: Arc<std::sync::Mutex<Analyser>>,
+    analyser: Analyser,
 }
 
 impl Player {
@@ -94,12 +81,12 @@ impl Player {
             .spawn(move || decoder.run())
             .map_err(PlayerError::Thread)?;
         tracing::info!(rate = output.rate, channels = output.channels, "audio output opened");
-        Ok(Self { commands, shared, stream: output.stream, rate: output.rate, analyser: Arc::new(std::sync::Mutex::new(analyser)) })
+        Ok(Self { commands, shared, stream: output.stream, rate: output.rate, analyser })
     }
 
     /// The latest spectrum. `playing` selects analysis; otherwise the frame is the idle breath.
     pub fn audio_frame(&mut self, playing: bool, wall_ms: f64) -> AudioFrame {
-        self.analyser.lock().map_or(AudioFrame::SILENT, |mut tap| *tap.frame(playing, wall_ms))
+        *self.analyser.frame(playing, wall_ms)
     }
 
     /// Starts playing `path` from the beginning.
@@ -152,16 +139,13 @@ impl Player {
     pub fn status(&self) -> Status {
         #[cfg(target_os="android")]
         self.stream.maintain();
-        self.timeline_status()
-    }
-
-    /// Read the playback clock without doing output-stream maintenance on render ticks.
-    pub fn timeline_status(&self) -> Status {
-        timeline(&self.shared,self.rate)
-    }
-
-    pub fn clock(&self) -> PlaybackClock {
-        PlaybackClock { shared:self.shared.clone(), rate:self.rate, analyser:self.analyser.clone() }
+        let state = self.shared.state();
+        let duration = self.shared.duration.load();
+        let position = match state {
+            PlayerState::Idle => 0.0,
+            _ => self.shared.position(self.rate).min(if duration > 0.0 { duration } else { f64::MAX }),
+        };
+        Status { state, position, duration }
     }
 
     fn send(&self, command: Command) {
@@ -177,14 +161,4 @@ impl Player {
             tracing::warn!(error = &err as &dyn std::error::Error, running, "cannot change output stream state");
         }
     }
-}
-
-fn timeline(shared:&Shared, rate:u32) -> Status {
-        let state = shared.state();
-        let duration = shared.duration.load();
-        let position = match state {
-            PlayerState::Idle => 0.0,
-            _ => shared.position(rate).min(if duration > 0.0 { duration } else { f64::MAX }),
-        };
-        Status { state, position, duration }
 }

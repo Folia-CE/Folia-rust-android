@@ -12,41 +12,25 @@ const INTRO: Ease = Ease::new(0.25, 1.0, 0.5, 1.0);
 /// `[0.32, 0.72, 0, 1]`: the rail's opacity, blur, exit and subtitle-row tweens.
 pub const SWAP: Ease = Ease::new(0.32, 0.72, 0.0, 1.0);
 
-/// Both Monet rail springs are overdamped. Sample the two roots once for the whole
-/// window. Retargeting carries the position and derivative of the presented frame.
-pub struct Spring {
-    position: f32,
-    velocity: f32,
-    d_position: f32,
-    d_velocity: f32,
-}
-
-impl Spring {
-    fn sample(t: f64, stiffness: f64, damping: f64, mass: f64) -> Self {
-        let disc = (damping * damping - 4. * mass * stiffness).sqrt();
-        let a = (-damping + disc) / (2. * mass);
-        let b = (-damping - disc) / (2. * mass);
-        let ea = (a * t.max(0.)).exp();
-        let eb = (b * t.max(0.)).exp();
-        Self {
-            position: ((a * eb - b * ea) / (a - b)) as f32,
-            velocity: ((ea - eb) / (a - b)) as f32,
-            d_position: (a * b * (eb - ea) / (a - b)) as f32,
-            d_velocity: ((a * ea - b * eb) / (a - b)) as f32,
-        }
-    }
-
-    pub fn scroll(t: f64) -> Self {
-        Self::sample(t, SCROLL_STIFFNESS, SCROLL_DAMPING, SCROLL_MASS)
-    }
-    pub fn scale(t: f64) -> Self {
-        Self::sample(t, SCALE_STIFFNESS, SCALE_DAMPING, SCALE_MASS)
-    }
-
-    pub fn apply(&self, from: f32, to: f32, speed: f32) -> (f32, f32) {
-        let delta = from - to;
-        (to + delta * self.position + speed * self.velocity, delta * self.d_position + speed * self.d_velocity)
-    }
+/// A spring with mass, released from rest, as framer-motion resolves it. Both rail springs are overdamped.
+pub fn spring(from: f64, to: f64, elapsed: f64, stiffness: f64, damping: f64, mass: f64) -> f64 {
+    let mass = mass.max(1.0e-4);
+    let t = elapsed.max(0.0);
+    let omega = (stiffness / mass).sqrt();
+    let zeta = damping / (2.0 * (stiffness * mass).sqrt());
+    let decay = (-zeta * omega * t).exp();
+    let offset = from - to;
+    let displacement = if zeta < 1.0 {
+        let omega_d = omega * (1.0 - zeta * zeta).sqrt();
+        offset * decay * ((omega_d * t).cos() + zeta * omega / omega_d * (omega_d * t).sin())
+    } else if zeta > 1.0 {
+        let omega_d = omega * (zeta * zeta - 1.0).sqrt();
+        let arg = (omega_d * t).min(300.0);
+        offset * decay * (arg.cosh() + zeta * omega / omega_d * arg.sinh())
+    } else {
+        offset * decay * (1.0 + omega * t)
+    };
+    to + displacement
 }
 
 pub fn intro(time: f64, delay: f64, duration: f64) -> f32 {
